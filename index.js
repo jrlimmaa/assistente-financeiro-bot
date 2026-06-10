@@ -6,8 +6,7 @@ import dotenv from "dotenv";
 import cron from "node-cron";
 import { z } from "zod";
 import moment from "moment-timezone";
-import pkg from 'uuid';
-const { v4: uuidv4 } = pkg;
+import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
@@ -18,7 +17,6 @@ app.use(express.json());
 // 🔌 CONEXÕES
 // =========================
 
-// WEBHOOK: removemos polling: true
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN);
 
 const usuarios = {
