@@ -36,7 +36,7 @@ const openai = new OpenAI({
 const SYSTEM_PROMPT = `
 Você é um assistente financeiro.
 
-Transforme mensagens em JSON.
+Transforme mensagens em JSON válido.
 
 Se for gasto:
 {
@@ -66,15 +66,19 @@ Responda APENAS JSON válido.
 `;
 
 async function interpretar(texto) {
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: texto }
-    ]
-  });
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: texto }
+      ]
+    });
 
-  return JSON.parse(res.choices[0].message.content);
+    return JSON.parse(res.choices[0].message.content);
+  } catch (e) {
+    return { type: "erro" };
+  }
 }
 
 // =========================
@@ -94,8 +98,8 @@ async function saldoTotal(chatId) {
     .select("valor")
     .eq("usuario", usuario);
 
-  const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor), 0);
-  const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor), 0);
+  const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
+  const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
 
   return {
     gastos: totalGastos,
@@ -125,8 +129,8 @@ async function saldoGeral() {
       .select("valor")
       .eq("usuario", usuario);
 
-    totalGastos += (gastos || []).reduce((a, b) => a + Number(b.valor), 0);
-    totalReceitas += (receitas || []).reduce((a, b) => a + Number(b.valor), 0);
+    totalGastos += (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
+    totalReceitas += (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
   }
 
   return `
@@ -139,7 +143,7 @@ async function saldoGeral() {
 }
 
 // =========================
-// 📊 CATEGORIAS POR PESSOA
+// 📊 CATEGORIAS
 // =========================
 
 async function categorias(chatId) {
@@ -150,18 +154,24 @@ async function categorias(chatId) {
     .select("categoria, valor")
     .eq("usuario", usuario);
 
+  if (!data || data.length === 0) {
+    return `📊 Nenhum gasto encontrado para ${usuario}`;
+  }
+
   const resumo = {};
 
-  (data || []).forEach(item => {
+  data.forEach(item => {
     const cat = item.categoria || "outros";
-    resumo[cat] = (resumo[cat] || 0) + Number(item.valor);
+    resumo[cat] = (resumo[cat] || 0) + Number(item.valor || 0);
   });
 
   const msg = Object.entries(resumo)
     .map(([cat, val]) => `• ${cat}: R$ ${val.toFixed(2)}`)
     .join("\n");
 
-  return `📊 GASTOS POR CATEGORIA (${usuarios[chatId]})\n\n${msg}`;
+  return `📊 GASTOS POR CATEGORIA (${usuario})
+
+${msg}`;
 }
 
 // =========================
@@ -176,25 +186,16 @@ bot.on("message", async (msg) => {
 
   try {
 
-    // =========================
-    // 📌 SALDO GERAL (PRIMEIRO!)
-    // =========================
     if (text.includes("saldo geral")) {
       const msg = await saldoGeral();
       return bot.sendMessage(chatId, msg);
     }
 
-    // =========================
-    // 📊 CATEGORIAS
-    // =========================
     if (text.includes("categorias")) {
       const msg = await categorias(chatId);
       return bot.sendMessage(chatId, msg);
     }
 
-    // =========================
-    // 💰 SALDO INDIVIDUAL
-    // =========================
     if (text.includes("saldo")) {
       const s = await saldoTotal(chatId);
 
@@ -207,9 +208,6 @@ bot.on("message", async (msg) => {
       );
     }
 
-    // =========================
-    // 🧠 IA
-    // =========================
     const data = await interpretar(text);
 
     const usuario = usuarios[chatId];
@@ -218,8 +216,8 @@ bot.on("message", async (msg) => {
       await supabase.from("gastos").insert({
         usuario,
         descricao: data.descricao,
-        categoria: data.categoria,
-        valor: data.valor
+        categoria: data.categoria || "outros",
+        valor: data.valor || 0
       });
 
       return bot.sendMessage(chatId, "✅ Gasto registrado");
@@ -229,8 +227,8 @@ bot.on("message", async (msg) => {
       await supabase.from("receitas").insert({
         usuario,
         descricao: data.descricao,
-        valor: data.valor,
-        recorrente: data.recorrente
+        valor: data.valor || 0,
+        recorrente: data.recorrente || false
       });
 
       return bot.sendMessage(chatId, "💰 Receita registrada");
