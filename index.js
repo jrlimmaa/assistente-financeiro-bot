@@ -78,7 +78,7 @@ Responda APENAS JSON válido.
 
 async function interpretar(texto) {
   const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini",  // já alterado para o modelo correto
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: texto }
@@ -89,7 +89,7 @@ async function interpretar(texto) {
 }
 
 // =========================
-// 💰 SALDO
+// 💰 SALDO INDIVIDUAL
 // =========================
 
 async function saldoTotal(chatId) {
@@ -158,14 +158,46 @@ bot.on("message", async (msg) => {
 
   try {
 
-    // 💳 CARTÃO (novo comando)
+    // 💳 CARTÃO
     if (text.startsWith("cartao ")) {
       const cartao = text.replace("cartao ", "").trim();
       const resposta = await gastosPorCartao(chatId, cartao);
       return bot.sendMessage(chatId, resposta);
     }
 
-    // 💰 SALDO
+    // 👥 SALDO GERAL (Junior + Emanuelly com detalhamento)
+    if (text.includes("saldo geral") || text === "geral") {
+      let resposta = `📊 SALDO GERAL\n\n`;
+      let totalGastos = 0;
+      let totalReceitas = 0;
+
+      for (const [id, nome] of Object.entries(usuarios)) {
+        const { data: g } = await supabase
+          .from("gastos")
+          .select("valor")
+          .eq("usuario", nome);
+
+        const { data: r } = await supabase
+          .from("receitas")
+          .select("valor")
+          .eq("usuario", nome);
+
+        const gastos = (g || []).reduce((s, i) => s + Number(i.valor || 0), 0);
+        const receitas = (r || []).reduce((s, i) => s + Number(i.valor || 0), 0);
+        const saldo = receitas - gastos;
+
+        resposta += `👤 ${nome}\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💵 Saldo: R$ ${saldo.toFixed(2)}\n\n`;
+
+        totalReceitas += receitas;
+        totalGastos += gastos;
+      }
+
+      resposta += `💳 TOTAL CONSOLIDADO\n📥 Receitas: R$ ${totalReceitas.toFixed(2)}\n📤 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`;
+
+      return bot.sendMessage(chatId, resposta);
+    }
+
+    // 💰 SALDO INDIVIDUAL
     if (text.includes("saldo")) {
       const s = await saldoTotal(chatId);
 
@@ -178,7 +210,7 @@ bot.on("message", async (msg) => {
       );
     }
 
-    // 🧠 IA
+    // 🧠 IA (gasto/receita)
     const data = await interpretar(text);
     const usuario = usuarios[chatId];
 
