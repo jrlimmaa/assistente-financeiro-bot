@@ -136,6 +136,11 @@ const receitaSchema = z.object({
 });
 
 // =========================
+// 📌 PENDÊNCIAS (cartão parcelado)
+// =========================
+const pendencias = new Map(); // chatId -> { dados, timeout }
+
+// =========================
 // 💰 SALDO INDIVIDUAL
 // =========================
 
@@ -217,8 +222,8 @@ async function gastosPorCartao(chatId, cartaoNome) {
   let total = 0;
   const lista = data.map(g => {
     total += Number(g.valor);
-    const parcelasInfo = g.total_parcelas ? `(${g.parcela_numero}/${g.total_parcelas})` : '';
-    return `• ${g.descricao} - R$ ${g.valor} ${parcelasInfo}`;
+    const parcelasInfo = g.total_parcelas ? ` (${g.parcela_numero}/${g.total_parcelas})` : '';
+    return `• ${g.descricao} - R$ ${g.valor}${parcelasInfo}`;
   }).join("\n");
 
   return `💳 CARTÃO: ${cartaoNome}
@@ -307,6 +312,43 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "❌ Usuário não autorizado.");
   }
 
+  // 🛑 Verificar se há pendência de cartão para esse chat
+  if (pendencias.has(chatId)) {
+    const pendente = pendencias.get(chatId);
+    clearTimeout(pendente.timeout);
+    pendencias.delete(chatId);
+
+    const resposta = text.trim().toLowerCase();
+
+    // Se o usuário cancelar ou informar que não é cartão
+    if (resposta === 'pix' || resposta === 'dinheiro' || resposta === 'pular' || resposta === 'sem cartao') {
+      // Finaliza sem cartão
+      await criarGastoParcelado(
+        chatId,
+        pendente.dados.descricao,
+        pendente.dados.valor,
+        pendente.dados.parcelas,
+        null, // sem cartão
+        'pix',
+        pendente.dados.categoria
+      );
+      return bot.sendMessage(chatId, `✅ Gasto parcelado registrado (sem cartão): ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${(pendente.dados.valor / pendente.dados.parcelas).toFixed(2)}`);
+    }
+
+    // Assume que é o nome do cartão
+    const cartao = text.trim();
+    await criarGastoParcelado(
+      chatId,
+      pendente.dados.descricao,
+      pendente.dados.valor,
+      pendente.dados.parcelas,
+      cartao,
+      'cartao_credito',
+      pendente.dados.categoria
+    );
+    return bot.sendMessage(chatId, `✅ Gasto parcelado registrado no cartão ${cartao}: ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${(pendente.dados.valor / pendente.dados.parcelas).toFixed(2)}`);
+  }
+
   const isCommand = msg.entities && msg.entities.some(e => e.type === 'bot_command');
 
   if (isCommand) {
@@ -370,7 +412,7 @@ Ou fale naturalmente:
         if (isNaN(valor) || valor <= 0) return bot.sendMessage(chatId, "❌ Valor inválido.");
         let descricao = "";
         let parcelas = 1;
-        if (parts.length > 2 && parts[parts.length - 2]?.toLowerCase() === 'x') {
+        if (parts.length > 2 && (parts[parts.length - 2]?.toLowerCase() === 'x' || parts[parts.length - 2]?.toLowerCase() === 'parcelas')) {
           parcelas = parseInt(parts[parts.length - 1]);
           if (isNaN(parcelas) || parcelas < 1) parcelas = 1;
           descricao = parts.slice(1, -2).join(' ');
@@ -378,8 +420,29 @@ Ou fale naturalmente:
           descricao = parts.slice(1).join(' ') || 'sem descrição';
         }
 
-        await criarGastoParcelado(chatId, descricao, valor, parcelas);
-        return bot.sendMessage(chatId, `✅ Gasto registrado: ${descricao} - R$ ${valor.toFixed(2)} ${parcelas > 1 ? `(em ${parcelas}x)` : ''}`);
+        // Se parcelado > 1, perguntar o cartão (se não foi informado)
+        if (parcelas > 1) {
+          // Cria pendência
+          const timeout = setTimeout(() => {
+            pendencias.delete(chatId);
+            bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
+          }, 5 * 60 * 1000); // 5 minutos
+
+          pendencias.set(chatId, {
+            dados: { descricao, valor, parcelas, categoria: "outros" },
+            timeout
+          });
+
+          return bot.sendMessage(chatId,
+            `📋 Compra parcelada: ${descricao} - ${parcelas}x de R$ ${(valor / parcelas).toFixed(2)}\n` +
+            `💳 Qual cartão foi usado?\n` +
+            `(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`
+          );
+        }
+
+        // Gasto à vista
+        await criarGastoParcelado(chatId, descricao, valor, 1);
+        return bot.sendMessage(chatId, `✅ Gasto registrado: ${descricao} - R$ ${valor.toFixed(2)}`);
       }
 
       if (command === 'receita') {
@@ -464,11 +527,37 @@ Ou fale naturalmente:
     if (data.type === "gasto") {
       const parsed = gastoSchema.parse(data);
       if (parsed.parcelado && parsed.parcelas > 1) {
-        await criarGastoParcelado(chatId, parsed.descricao, parsed.valor, parsed.parcelas, parsed.cartao, parsed.forma_pagamento, parsed.categoria);
-        return bot.sendMessage(chatId,
-          `✅ Gasto parcelado registrado: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${(parsed.valor / parsed.parcelas).toFixed(2)}`
-        );
+        // Se já veio com cartão, registra direto
+        if (parsed.cartao) {
+          await criarGastoParcelado(chatId, parsed.descricao, parsed.valor, parsed.parcelas, parsed.cartao, parsed.forma_pagamento, parsed.categoria);
+          return bot.sendMessage(chatId,
+            `✅ Gasto parcelado registrado: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${(parsed.valor / parsed.parcelas).toFixed(2)} no cartão ${parsed.cartao}`
+          );
+        } else {
+          // Não tem cartão → pergunta
+          const timeout = setTimeout(() => {
+            pendencias.delete(chatId);
+            bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
+          }, 5 * 60 * 1000);
+
+          pendencias.set(chatId, {
+            dados: {
+              descricao: parsed.descricao,
+              valor: parsed.valor,
+              parcelas: parsed.parcelas,
+              categoria: parsed.categoria || "outros"
+            },
+            timeout
+          });
+
+          return bot.sendMessage(chatId,
+            `📋 Compra parcelada: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${(parsed.valor / parsed.parcelas).toFixed(2)}\n` +
+            `💳 Qual cartão foi usado?\n` +
+            `(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`
+          );
+        }
       } else {
+        // Gasto à vista
         await supabase.from("gastos").insert({
           usuario: usuarios[chatId],
           descricao: parsed.descricao,
@@ -523,7 +612,7 @@ async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cart
       descricao: `${descricao} (${i}/${parcelas})`,
       categoria,
       valor: valorParcela,
-      forma_pagamento,
+      forma_pagamento: cartao ? "cartao_credito" : forma_pagamento,
       cartao,
       parcelado: true,
       parcelas: parcelas,
@@ -541,7 +630,6 @@ async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cart
 
 const TIMEZONE = "America/Sao_Paulo";
 
-// 🌙 Lembrete diário às 20h
 cron.schedule("0 20 * * *", async () => {
   for (const chatId of Object.keys(usuarios)) {
     try {
@@ -552,7 +640,6 @@ cron.schedule("0 20 * * *", async () => {
   }
 }, { timezone: TIMEZONE });
 
-// 📆 Relatório semanal (sábado às 9h)
 cron.schedule("0 9 * * 6", async () => {
   const hoje = moment().tz(TIMEZONE);
   const seteDiasAtras = hoje.clone().subtract(7, 'days');
@@ -591,7 +678,6 @@ De ${seteDiasAtras.format("DD/MM")} a ${hoje.format("DD/MM")}
   }
 }, { timezone: TIMEZONE });
 
-// 📅 Fechamento mensal (todo dia 23 às 10h)
 cron.schedule("0 10 23 * *", async () => {
   const hoje = moment().tz(TIMEZONE);
   const mesAtual = hoje.month();
@@ -634,7 +720,6 @@ Período: ${inicio.format("DD/MM")} a ${fim.format("DD/MM")}
   }
 }, { timezone: TIMEZONE });
 
-// 🔁 Processar receitas recorrentes (todo dia à 1h da manhã)
 cron.schedule("0 1 * * *", async () => {
   const hoje = moment().tz(TIMEZONE);
   const diaHoje = hoje.date();
@@ -687,5 +772,5 @@ cron.schedule("0 1 * * *", async () => {
 app.get("/", (req, res) => res.send("Bot rodando"));
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Bot rodando com recorrências e parcelamentos.");
+  console.log("Bot rodando com fluxo de cartão para parceladas.");
 });
