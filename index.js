@@ -15,10 +15,10 @@ app.use(express.json());
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
-const usuarios = [
-  8823110547,
-  1325366143
-];
+const usuarios = {
+  8823110547: "Emanuelly",
+  1325366143: "Junior"
+};
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -82,15 +82,17 @@ async function interpretar(texto) {
 // =========================
 
 async function saldoTotal(chatId) {
+  const usuario = usuarios[chatId];
+
   const { data: gastos } = await supabase
     .from("gastos")
     .select("*")
-    .eq("usuario", String(chatId));
+    .eq("usuario", usuario);
 
   const { data: receitas } = await supabase
     .from("receitas")
     .select("*")
-    .eq("usuario", String(chatId));
+    .eq("usuario", usuario);
 
   const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor), 0);
   const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor), 0);
@@ -103,47 +105,33 @@ async function saldoTotal(chatId) {
 }
 
 // =========================
-// 📊 LIMITE INTELIGENTE
-// =========================
-
-async function limiteInteligente(chatId) {
-  const saldo = await saldoTotal(chatId);
-
-  const limiteDiario = saldo.saldo / 30;
-
-  return {
-    limiteDiario,
-    alerta: limiteDiario < 20 ? "⚠️ Orçamento muito apertado" : "✅ Saudável"
-  };
-}
-
-// =========================
-// 💸 SALÁRIO RECORRENTE AUTOMÁTICO
+// 💸 SALÁRIO RECORRENTE
 // =========================
 
 async function processarSalarioRecorrente() {
   const hoje = new Date().getDate();
 
-  if (hoje !== 1) return; // todo dia 1
+  if (hoje !== 1) return;
 
-  for (const chatId of usuarios) {
+  for (const chatId in usuarios) {
+    const usuario = usuarios[chatId];
 
     const { data: salarios } = await supabase
       .from("receitas")
       .select("*")
-      .eq("usuario", String(chatId))
+      .eq("usuario", usuario)
       .eq("recorrente", true);
 
     for (const s of salarios || []) {
       await supabase.from("receitas").insert({
-        usuario: chatId,
+        usuario,
         descricao: s.descricao,
         valor: s.valor,
         recorrente: true
       });
     }
 
-    bot.sendMessage(chatId, "💰 Salário recorrente processado do mês!");
+    bot.sendMessage(chatId, "💰 Salário recorrente processado!");
   }
 }
 
@@ -152,60 +140,64 @@ async function processarSalarioRecorrente() {
 // =========================
 
 async function alertaRisco() {
-  for (const chatId of usuarios) {
-    const saldo = await saldoTotal(chatId);
+  for (const chatId in usuarios) {
+    const usuario = usuarios[chatId];
 
-    const limite = saldo.receitas * 0.7;
+    const { data: gastos } = await supabase
+      .from("gastos")
+      .select("*")
+      .eq("usuario", usuario);
 
-    if (saldo.gastos >= limite) {
-      bot.sendMessage(
-        chatId,
-        "⚠️ ALERTA: Você já gastou mais de 70% da sua renda do mês!"
-      );
+    const { data: receitas } = await supabase
+      .from("receitas")
+      .select("*")
+      .eq("usuario", usuario);
+
+    const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor), 0);
+    const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor), 0);
+
+    const limite = totalReceitas * 0.7;
+
+    if (totalGastos >= limite) {
+      bot.sendMessage(chatId, "⚠️ ALERTA: Você já gastou mais de 70% da sua renda!");
     }
   }
 }
 
 // =========================
-// 📅 RELATÓRIO MENSAL (DIA 23)
+// 📅 RELATÓRIOS
 // =========================
 
 async function relatorioMensal() {
   const hoje = new Date().getDate();
   if (hoje !== 23) return;
 
-  for (const chatId of usuarios) {
-    const saldo = await saldoTotal(chatId);
+  for (const chatId in usuarios) {
+    const s = await saldoTotal(chatId);
 
-    bot.sendMessage(
-      chatId,
-      `🧾 RELATÓRIO MENSAL
+    bot.sendMessage(chatId,
+`🧾 RELATÓRIO MENSAL
 
-💰 Receitas: R$ ${saldo.receitas.toFixed(2)}
-📉 Gastos: R$ ${saldo.gastos.toFixed(2)}
-💳 Saldo: R$ ${saldo.saldo.toFixed(2)}`
+💰 Receitas: R$ ${s.receitas.toFixed(2)}
+📉 Gastos: R$ ${s.gastos.toFixed(2)}
+💳 Saldo: R$ ${s.saldo.toFixed(2)}`
     );
   }
 }
-
-// =========================
-// 📅 RELATÓRIO SEMANAL (DOMINGO)
-// =========================
 
 async function relatorioSemanal() {
   const hoje = new Date().getDay();
   if (hoje !== 0) return;
 
-  for (const chatId of usuarios) {
-    const saldo = await saldoTotal(chatId);
+  for (const chatId in usuarios) {
+    const s = await saldoTotal(chatId);
 
-    bot.sendMessage(
-      chatId,
-      `📅 RELATÓRIO SEMANAL
+    bot.sendMessage(chatId,
+`📅 RELATÓRIO SEMANAL
 
-💰 Receitas: R$ ${saldo.receitas.toFixed(2)}
-📉 Gastos: R$ ${saldo.gastos.toFixed(2)}
-💳 Saldo: R$ ${saldo.saldo.toFixed(2)}`
+💰 Receitas: R$ ${s.receitas.toFixed(2)}
+📉 Gastos: R$ ${s.gastos.toFixed(2)}
+💳 Saldo: R$ ${s.saldo.toFixed(2)}`
     );
   }
 }
@@ -224,16 +216,23 @@ bot.on("message", async (msg) => {
 
     if (text.includes("saldo")) {
       const s = await saldoTotal(chatId);
+
       return bot.sendMessage(chatId,
-        `💰 SALDO\n\n📥 ${s.receitas}\n📤 ${s.gastos}\n💳 ${s.saldo}`
+`💰 SALDO
+
+📥 ${s.receitas}
+📤 ${s.gastos}
+💳 ${s.saldo}`
       );
     }
 
     const data = await interpretar(text);
 
+    const usuario = usuarios[chatId];
+
     if (data.type === "gasto") {
       await supabase.from("gastos").insert({
-        usuario: String(chatId),
+        usuario,
         descricao: data.descricao,
         categoria: data.categoria,
         valor: data.valor
@@ -244,7 +243,7 @@ bot.on("message", async (msg) => {
 
     if (data.type === "receita") {
       await supabase.from("receitas").insert({
-        usuario: String(chatId),
+        usuario,
         descricao: data.descricao,
         valor: data.valor,
         recorrente: data.recorrente
@@ -260,7 +259,7 @@ bot.on("message", async (msg) => {
 });
 
 // =========================
-// ⏰ LOOP AUTOMÁTICO
+// ⏰ LOOP
 // =========================
 
 setInterval(async () => {
@@ -268,7 +267,7 @@ setInterval(async () => {
   await alertaRisco();
   await relatorioMensal();
   await relatorioSemanal();
-}, 60 * 60 * 1000); // 1h
+}, 60 * 60 * 1000);
 
 // =========================
 // 🌐 SERVER
