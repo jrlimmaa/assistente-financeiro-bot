@@ -30,33 +30,27 @@ const openai = new OpenAI({
 });
 
 // =========================
-// 🧠 IA PROMPT (MELHORADO)
+// 🧠 IA PROMPT
 // =========================
 
 const SYSTEM_PROMPT = `
 Você é um assistente financeiro.
 
-Você pode retornar:
+Transforme mensagens em JSON válido.
 
-1) Gasto único:
+Se for gasto:
 {
   "type": "gasto",
   "descricao": "",
   "categoria": "",
-  "valor": number
+  "valor": number,
+  "forma_pagamento": "pix | dinheiro | cartao_credito",
+  "cartao": "",
+  "parcelado": boolean,
+  "parcelas": number
 }
 
-2) LISTA DE GASTOS (fatura/extrato):
-[
-  {
-    "type": "gasto",
-    "descricao": "",
-    "categoria": "",
-    "valor": number
-  }
-]
-
-3) Receita:
+Se for receita:
 {
   "type": "receita",
   "descricao": "",
@@ -64,35 +58,38 @@ Você pode retornar:
   "recorrente": boolean
 }
 
-4) Consulta:
+Se for consulta:
 {
   "type": "consulta"
 }
 
-Categorias:
-alimentacao, transporte, lazer, mercado, contas, saude, outros.
+REGRAS:
+- Se não falar pagamento → assumir "pix"
+- PIX e dinheiro = "pix"
+- Só usar cartão se citado explicitamente
+- Parcelas: se não falar → 1
 
-Responda SOMENTE JSON válido.
+Responda APENAS JSON válido.
 `;
 
-async function interpretar(texto) {
-  try {
-    const res = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: texto }
-      ]
-    });
+// =========================
+// 🧠 IA
+// =========================
 
-    return JSON.parse(res.choices[0].message.content);
-  } catch (e) {
-    return { type: "erro" };
-  }
+async function interpretar(texto) {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: texto }
+    ]
+  });
+
+  return JSON.parse(res.choices[0].message.content);
 }
 
 // =========================
-// 💰 SALDO INDIVIDUAL
+// 💰 SALDO
 // =========================
 
 async function saldoTotal(chatId) {
@@ -119,73 +116,38 @@ async function saldoTotal(chatId) {
 }
 
 // =========================
-// 👥 SALDO GERAL
+// 💳 GASTOS POR CARTÃO
 // =========================
 
-async function saldoGeral() {
-  let totalReceitas = 0;
-  let totalGastos = 0;
-
-  for (const id in usuarios) {
-    const usuario = usuarios[id];
-
-    const { data: gastos } = await supabase
-      .from("gastos")
-      .select("valor")
-      .eq("usuario", usuario);
-
-    const { data: receitas } = await supabase
-      .from("receitas")
-      .select("valor")
-      .eq("usuario", usuario);
-
-    totalGastos += (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
-    totalReceitas += (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
-  }
-
-  return `
-👥 SALDO GERAL
-
-💰 Receitas: R$ ${totalReceitas.toFixed(2)}
-📉 Gastos: R$ ${totalGastos.toFixed(2)}
-💳 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}
-`;
-}
-
-// =========================
-// 📊 CATEGORIAS
-// =========================
-
-async function categorias(chatId) {
+async function gastosPorCartao(chatId, cartaoNome) {
   const usuario = usuarios[chatId];
 
   const { data } = await supabase
     .from("gastos")
-    .select("categoria, valor")
-    .eq("usuario", usuario);
+    .select("descricao, valor, parcelas")
+    .eq("usuario", usuario)
+    .eq("cartao", cartaoNome);
 
   if (!data || data.length === 0) {
-    return `📊 Nenhum gasto encontrado para ${usuario}`;
+    return `💳 Nenhum gasto encontrado no cartão ${cartaoNome}`;
   }
 
-  const resumo = {};
+  let total = 0;
 
-  data.forEach(item => {
-    const cat = item.categoria || "outros";
-    resumo[cat] = (resumo[cat] || 0) + Number(item.valor || 0);
-  });
+  const lista = data.map(g => {
+    total += Number(g.valor);
+    return `• ${g.descricao} - R$ ${g.valor} (${g.parcelas}x)`;
+  }).join("\n");
 
-  const msg = Object.entries(resumo)
-    .map(([cat, val]) => `• ${cat}: R$ ${val.toFixed(2)}`)
-    .join("\n");
+  return `💳 CARTÃO: ${cartaoNome}
 
-  return `📊 GASTOS POR CATEGORIA (${usuario})
+${lista}
 
-${msg}`;
+💰 TOTAL: R$ ${total.toFixed(2)}`;
 }
 
 // =========================
-// 🤖 BOT (COM FATURA MULTI-ITEM)
+// 🤖 BOT
 // =========================
 
 bot.on("message", async (msg) => {
@@ -196,16 +158,14 @@ bot.on("message", async (msg) => {
 
   try {
 
-    if (text.includes("saldo geral")) {
-      const msg = await saldoGeral();
-      return bot.sendMessage(chatId, msg);
+    // 💳 CARTÃO (novo comando)
+    if (text.startsWith("cartao ")) {
+      const cartao = text.replace("cartao ", "").trim();
+      const resposta = await gastosPorCartao(chatId, cartao);
+      return bot.sendMessage(chatId, resposta);
     }
 
-    if (text.includes("categorias")) {
-      const msg = await categorias(chatId);
-      return bot.sendMessage(chatId, msg);
-    }
-
+    // 💰 SALDO
     if (text.includes("saldo")) {
       const s = await saldoTotal(chatId);
 
@@ -218,44 +178,25 @@ bot.on("message", async (msg) => {
       );
     }
 
+    // 🧠 IA
     const data = await interpretar(text);
     const usuario = usuarios[chatId];
 
-    // =========================
-    // 💥 CASO 1: LISTA DE GASTOS (FATURA)
-    // =========================
-    if (Array.isArray(data)) {
-      for (const item of data) {
-        if (item.type === "gasto") {
-          await supabase.from("gastos").insert({
-            usuario,
-            descricao: item.descricao,
-            categoria: item.categoria || "outros",
-            valor: item.valor || 0
-          });
-        }
-      }
-
-      return bot.sendMessage(chatId, "✅ Fatura processada com sucesso");
-    }
-
-    // =========================
-    // 💸 GASTO ÚNICO
-    // =========================
     if (data.type === "gasto") {
       await supabase.from("gastos").insert({
         usuario,
         descricao: data.descricao,
         categoria: data.categoria || "outros",
-        valor: data.valor || 0
+        valor: data.valor || 0,
+        forma_pagamento: data.forma_pagamento || "pix",
+        cartao: data.cartao || null,
+        parcelado: data.parcelado || false,
+        parcelas: data.parcelas || 1
       });
 
       return bot.sendMessage(chatId, "✅ Gasto registrado");
     }
 
-    // =========================
-    // 💰 RECEITA
-    // =========================
     if (data.type === "receita") {
       await supabase.from("receitas").insert({
         usuario,
