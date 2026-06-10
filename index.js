@@ -78,7 +78,7 @@ Responda APENAS JSON válido.
 
 async function interpretar(texto) {
   const res = await openai.chat.completions.create({
-    model: "gpt-5.4-mini",
+    model: "gpt-4o-mini",
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: texto }
