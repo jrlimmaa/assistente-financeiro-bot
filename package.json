@@ -1,0 +1,18 @@
+{
+  "name": "assistente-financeiro-bot",
+  "version": "1.0.0",
+  "description": "Bot financeiro pessoal com Telegram, OpenAI e Supabase",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.0.0"
+  }
+}
