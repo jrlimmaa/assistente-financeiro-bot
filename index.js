@@ -6,7 +6,8 @@ import dotenv from "dotenv";
 import cron from "node-cron";
 import { z } from "zod";
 import moment from "moment-timezone";
-import { v4 as uuidv4 } from "uuid";
+import pkg from 'uuid';
+const { v4: uuidv4 } = pkg;
 
 dotenv.config();
 
@@ -17,7 +18,8 @@ app.use(express.json());
 // 🔌 CONEXÕES
 // =========================
 
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+// WEBHOOK: removemos polling: true
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN);
 
 const usuarios = {
   8823110547: "Emanuelly",
@@ -31,6 +33,17 @@ const supabase = createClient(
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+});
+
+// =========================
+// 🌐 CONFIGURAÇÃO DO WEBHOOK
+// =========================
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_ID}.onrender.com`;
+bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+
+app.post('/webhook', (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
 });
 
 // =========================
@@ -53,9 +66,8 @@ const openai = new OpenAI({
 })();
 
 // =========================
-// 🧠 IA PROMPT (ATUALIZADO)
+// 🧠 IA PROMPT
 // =========================
-
 const SYSTEM_PROMPT = `
 Você é um assistente financeiro.
 
@@ -121,7 +133,6 @@ Responda APENAS JSON válido.
 // =========================
 // 🧠 IA
 // =========================
-
 async function interpretar(texto) {
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -130,14 +141,12 @@ async function interpretar(texto) {
       { role: "user", content: texto }
     ]
   });
-
   return JSON.parse(res.choices[0].message.content);
 }
 
 // =========================
 // ✅ VALIDAÇÃO COM ZOD
 // =========================
-
 const gastoSchema = z.object({
   type: z.literal("gasto"),
   descricao: z.string().min(1),
@@ -162,28 +171,23 @@ const receitaSchema = z.object({
 // =========================
 // 📌 PENDÊNCIAS (cartão parcelado)
 // =========================
-const pendencias = new Map(); // chatId -> { dados, timeout }
+const pendencias = new Map();
 
 // =========================
 // 💰 SALDO INDIVIDUAL
 // =========================
-
 async function saldoIndividual(chatId) {
   const usuario = usuarios[chatId];
-
   const { data: gastos } = await supabase
     .from("gastos")
     .select("valor")
     .eq("usuario", usuario);
-
   const { data: receitas } = await supabase
     .from("receitas")
     .select("valor")
     .eq("usuario", usuario);
-
   const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
   const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
-
   return {
     gastos: totalGastos,
     receitas: totalReceitas,
@@ -194,108 +198,82 @@ async function saldoIndividual(chatId) {
 // =========================
 // 👥 SALDO GERAL
 // =========================
-
 async function saldoGeral() {
   let resposta = `📊 SALDO GERAL\n\n`;
   let totalGastos = 0;
   let totalReceitas = 0;
-
   for (const [id, nome] of Object.entries(usuarios)) {
     const { data: g } = await supabase
       .from("gastos")
       .select("valor")
       .eq("usuario", nome);
-
     const { data: r } = await supabase
       .from("receitas")
       .select("valor")
       .eq("usuario", nome);
-
     const gastos = (g || []).reduce((s, i) => s + Number(i.valor || 0), 0);
     const receitas = (r || []).reduce((s, i) => s + Number(i.valor || 0), 0);
     const saldo = receitas - gastos;
-
     resposta += `👤 ${nome}\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💵 Saldo: R$ ${saldo.toFixed(2)}\n\n`;
-
     totalReceitas += receitas;
     totalGastos += gastos;
   }
-
   resposta += `💳 TOTAL CONSOLIDADO\n📥 Receitas: R$ ${totalReceitas.toFixed(2)}\n📤 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`;
-
   return resposta;
 }
 
 // =========================
 // 💳 GASTOS POR CARTÃO
 // =========================
-
 async function gastosPorCartao(chatId, cartaoNome) {
   const usuario = usuarios[chatId];
-
   const { data } = await supabase
     .from("gastos")
     .select("descricao, valor, total_parcelas, parcela_numero")
     .eq("usuario", usuario)
     .eq("cartao", cartaoNome);
-
   if (!data || data.length === 0) {
     return `💳 Nenhum gasto encontrado no cartão ${cartaoNome}`;
   }
-
   let total = 0;
   const lista = data.map(g => {
     total += Number(g.valor);
     const parcelasInfo = g.total_parcelas ? ` (${g.parcela_numero}/${g.total_parcelas})` : '';
     return `• ${g.descricao} - R$ ${g.valor}${parcelasInfo}`;
   }).join("\n");
-
-  return `💳 CARTÃO: ${cartaoNome}
-
-${lista}
-
-💰 TOTAL: R$ ${total.toFixed(2)}`;
+  return `💳 CARTÃO: ${cartaoNome}\n\n${lista}\n\n💰 TOTAL: R$ ${total.toFixed(2)}`;
 }
 
 // =========================
 // 💳 LISTAR CARTÕES
 // =========================
-
 async function listarCartoes(chatId) {
   const usuario = usuarios[chatId];
-
   const { data } = await supabase
     .from("gastos")
     .select("cartao")
     .eq("usuario", usuario)
     .not("cartao", "is", null);
-
   const cartoes = [...new Set(data.map(d => d.cartao))];
-
   if (cartoes.length === 0) {
     return "📭 Nenhum cartão registrado até agora.";
   }
-
   return `💳 Seus cartões:\n${cartoes.join('\n')}`;
 }
 
 // =========================
 // 🔁 RECEITAS RECORRENTES
 // =========================
-
 async function listarRecorrentes(chatId) {
   const usuario = usuarios[chatId];
-
   const { data } = await supabase
     .from("receitas")
     .select("id, descricao, valor, dia_recorrencia, ativo")
     .eq("usuario", usuario)
     .eq("recorrente", true);
-
   if (!data || data.length === 0) {
     return "📭 Nenhuma receita recorrente ativa.";
   }
-
   let resposta = `🔄 RECEITAS RECORRENTES (${usuario})\n\n`;
   data.forEach(r => {
     resposta += `• ID: ${r.id}\n  ${r.descricao} - R$ ${r.valor} (dia ${r.dia_recorrencia}) ${r.ativo ? '✅' : '❌'}\n\n`;
@@ -313,32 +291,26 @@ async function cancelarRecorrente(chatId, id) {
     .eq("usuario", usuario)
     .eq("recorrente", true)
     .single();
-
   if (!data) {
     return "❌ Recorrência não encontrada ou já cancelada.";
   }
-
   await supabase.from("receitas").update({ ativo: false }).eq("id", id);
   return "✅ Recorrência cancelada.";
 }
 
 // =========================
-// 🔁 GASTOS RECORRENTES (NOVO)
+// 🔁 GASTOS RECORRENTES
 // =========================
-
 async function listarGastosRecorrentes(chatId) {
   const usuario = usuarios[chatId];
-
   const { data } = await supabase
     .from("gastos")
     .select("id, descricao, valor, dia_recorrencia, ativo")
     .eq("usuario", usuario)
     .eq("recorrente", true);
-
   if (!data || data.length === 0) {
     return "📭 Nenhum gasto recorrente ativo.";
   }
-
   let resposta = `🔄 GASTOS RECORRENTES (${usuario})\n\n`;
   data.forEach(g => {
     resposta += `• ID: ${g.id}\n  ${g.descricao} - R$ ${g.valor} (dia ${g.dia_recorrencia}) ${g.ativo ? '✅' : '❌'}\n\n`;
@@ -356,11 +328,9 @@ async function cancelarGastoRecorrente(chatId, id) {
     .eq("usuario", usuario)
     .eq("recorrente", true)
     .single();
-
   if (!data) {
     return "❌ Gasto recorrente não encontrado ou já cancelado.";
   }
-
   await supabase.from("gastos").update({ ativo: false }).eq("id", id);
   return "✅ Gasto recorrente cancelado.";
 }
@@ -368,10 +338,8 @@ async function cancelarGastoRecorrente(chatId, id) {
 // =========================
 // 🤖 BOT – HANDLER
 // =========================
-
 bot.on("message", async (msg) => {
   if (!msg?.text) return;
-
   const chatId = msg.chat.id;
   const text = msg.text;
 
@@ -379,14 +347,12 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "❌ Usuário não autorizado.");
   }
 
-  // 🛑 Verificar pendência de cartão para parcelado
+  // 🛑 Pendência de cartão
   if (pendencias.has(chatId)) {
     const pendente = pendencias.get(chatId);
     clearTimeout(pendente.timeout);
     pendencias.delete(chatId);
-
     const resposta = text.trim().toLowerCase();
-
     if (resposta === 'pix' || resposta === 'dinheiro' || resposta === 'pular' || resposta === 'sem cartao') {
       await criarGastoParcelado(
         chatId,
@@ -399,7 +365,6 @@ bot.on("message", async (msg) => {
       );
       return bot.sendMessage(chatId, `✅ Gasto parcelado registrado (sem cartão): ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${(pendente.dados.valor / pendente.dados.parcelas).toFixed(2)}`);
     }
-
     const cartao = text.trim();
     await criarGastoParcelado(
       chatId,
@@ -414,11 +379,9 @@ bot.on("message", async (msg) => {
   }
 
   const isCommand = msg.entities && msg.entities.some(e => e.type === 'bot_command');
-
   if (isCommand) {
     const command = text.split(' ')[0].substring(1).toLowerCase();
     const args = text.substring(command.length + 1).trim();
-
     try {
       if (command === 'start') {
         return bot.sendMessage(chatId,
@@ -444,7 +407,6 @@ Ou fale naturalmente:
 "Saldo geral"`
         );
       }
-
       if (command === 'saldo') {
         const s = await saldoIndividual(chatId);
         return bot.sendMessage(chatId,
@@ -455,57 +417,40 @@ Ou fale naturalmente:
 💳 Saldo: ${s.saldo.toFixed(2)}`
         );
       }
-
       if (command === 'geral') {
         const resposta = await saldoGeral();
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'cartao') {
         if (!args) return bot.sendMessage(chatId, "❌ Use: /cartao NomeDoCartao");
         const resposta = await gastosPorCartao(chatId, args);
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'cartoes') {
         const resposta = await listarCartoes(chatId);
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'gasto') {
         if (!args) return bot.sendMessage(chatId, "❌ Use: /gasto valor descrição [parcelas X] [dia X]");
         const parts = args.split(' ');
         const valor = parseFloat(parts[0]);
         if (isNaN(valor) || valor <= 0) return bot.sendMessage(chatId, "❌ Valor inválido.");
-
         let descricao = "";
         let parcelas = 1;
         let diaRecorrencia = null;
-
-        // Procura por "parcelas X" ou "Xx"
         const parcelasIndex = parts.findIndex(p => p.toLowerCase() === 'parcelas' || p.toLowerCase() === 'x');
         if (parcelasIndex !== -1 && parts[parcelasIndex + 1]) {
           parcelas = parseInt(parts[parcelasIndex + 1]);
           if (isNaN(parcelas) || parcelas < 1) parcelas = 1;
-          // Descrição é tudo antes do parcelasIndex, exceto o valor
           descricao = parts.slice(1, parcelasIndex).join(' ');
         }
-
-        // Procura por "dia X"
         const diaIndex = parts.findIndex(p => p.toLowerCase() === 'dia');
         if (diaIndex !== -1 && parts[diaIndex + 1]) {
           diaRecorrencia = parseInt(parts[diaIndex + 1]);
           if (isNaN(diaRecorrencia)) diaRecorrencia = null;
-          // Se já tinha descricao definida, mantém; senão pega até o diaIndex
           if (!descricao) descricao = parts.slice(1, diaIndex).join(' ');
         }
-
-        if (!descricao) {
-          // Caso não tenha parcelas nem dia, pega tudo após o valor
-          descricao = parts.slice(1).join(' ') || 'sem descrição';
-        }
-
-        // Se for recorrente, ignorar parcelas
+        if (!descricao) descricao = parts.slice(1).join(' ') || 'sem descrição';
         if (diaRecorrencia) {
           await supabase.from("gastos").insert({
             usuario: usuarios[chatId],
@@ -523,27 +468,17 @@ Ou fale naturalmente:
           });
           return bot.sendMessage(chatId, `✅ Gasto recorrente registrado: ${descricao} - R$ ${valor.toFixed(2)} todo dia ${diaRecorrencia}`);
         }
-
-        // Se parcelado, pergunta cartão (como antes)
         if (parcelas > 1) {
           const timeout = setTimeout(() => {
             pendencias.delete(chatId);
             bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
           }, 5 * 60 * 1000);
-          pendencias.set(chatId, {
-            dados: { descricao, valor, parcelas, categoria: "outros" },
-            timeout
-          });
-          return bot.sendMessage(chatId,
-            `📋 Compra parcelada: ${descricao} - ${parcelas}x de R$ ${(valor / parcelas).toFixed(2)}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`
-          );
+          pendencias.set(chatId, { dados: { descricao, valor, parcelas, categoria: "outros" }, timeout });
+          return bot.sendMessage(chatId, `📋 Compra parcelada: ${descricao} - ${parcelas}x de R$ ${(valor / parcelas).toFixed(2)}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`);
         }
-
-        // Gasto à vista normal
         await criarGastoParcelado(chatId, descricao, valor, 1);
         return bot.sendMessage(chatId, `✅ Gasto registrado: ${descricao} - R$ ${valor.toFixed(2)}`);
       }
-
       if (command === 'receita') {
         if (!args) return bot.sendMessage(chatId, "❌ Use: /receita valor descrição [dia X]");
         const parts = args.split(' ');
@@ -558,7 +493,6 @@ Ou fale naturalmente:
         } else {
           descricao = parts.slice(1).join(' ') || 'sem descrição';
         }
-
         await supabase.from("receitas").insert({
           usuario: usuarios[chatId],
           descricao,
@@ -573,29 +507,24 @@ Ou fale naturalmente:
           (diaRecorrencia ? ` (recorrente todo dia ${diaRecorrencia})` : '')
         );
       }
-
       if (command === 'recorrentes') {
         const resposta = await listarRecorrentes(chatId);
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'cancelarrecorrente') {
         if (!args) return bot.sendMessage(chatId, "❌ Use: /cancelarrecorrente <id>");
         const resposta = await cancelarRecorrente(chatId, args);
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'gastosrecorrentes') {
         const resposta = await listarGastosRecorrentes(chatId);
         return bot.sendMessage(chatId, resposta);
       }
-
       if (command === 'cancelargastorecorrente') {
         if (!args) return bot.sendMessage(chatId, "❌ Use: /cancelargastorecorrente <id>");
         const resposta = await cancelarGastoRecorrente(chatId, args);
         return bot.sendMessage(chatId, resposta);
       }
-
       return bot.sendMessage(chatId, "❓ Comando não reconhecido.");
     } catch (err) {
       console.error(err);
@@ -608,12 +537,10 @@ Ou fale naturalmente:
   // =========================
   try {
     const textLower = text.toLowerCase();
-
     if (textLower.includes("saldo geral") || textLower === "geral") {
       const resposta = await saldoGeral();
       return bot.sendMessage(chatId, resposta);
     }
-
     if (textLower.includes("saldo")) {
       const s = await saldoIndividual(chatId);
       return bot.sendMessage(chatId,
@@ -624,20 +551,15 @@ Ou fale naturalmente:
 💳 Saldo: ${s.saldo.toFixed(2)}`
       );
     }
-
     if (textLower.startsWith("cartao ")) {
       const cartao = text.replace(/^cartao\s+/i, "").trim();
       const resposta = await gastosPorCartao(chatId, cartao);
       return bot.sendMessage(chatId, resposta);
     }
 
-    // 🧠 IA
     const data = await interpretar(text);
-
     if (data.type === "gasto") {
       const parsed = gastoSchema.parse(data);
-
-      // Gasto recorrente (ignora parcelado)
       if (parsed.recorrente) {
         await supabase.from("gastos").insert({
           usuario: usuarios[chatId],
@@ -658,8 +580,6 @@ Ou fale naturalmente:
           (parsed.dia_recorrencia ? ` todo dia ${parsed.dia_recorrencia}` : '')
         );
       }
-
-      // Gasto parcelado
       if (parsed.parcelado && parsed.parcelas > 1) {
         if (parsed.cartao) {
           await criarGastoParcelado(chatId, parsed.descricao, parsed.valor, parsed.parcelas, parsed.cartao, parsed.forma_pagamento, parsed.categoria);
@@ -672,12 +592,7 @@ Ou fale naturalmente:
             bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
           }, 5 * 60 * 1000);
           pendencias.set(chatId, {
-            dados: {
-              descricao: parsed.descricao,
-              valor: parsed.valor,
-              parcelas: parsed.parcelas,
-              categoria: parsed.categoria || "outros"
-            },
+            dados: { descricao: parsed.descricao, valor: parsed.valor, parcelas: parsed.parcelas, categoria: parsed.categoria || "outros" },
             timeout
           });
           return bot.sendMessage(chatId,
@@ -685,8 +600,7 @@ Ou fale naturalmente:
           );
         }
       }
-
-      // Gasto à vista normal
+      // Gasto simples
       await supabase.from("gastos").insert({
         usuario: usuarios[chatId],
         descricao: parsed.descricao,
@@ -700,7 +614,6 @@ Ou fale naturalmente:
       });
       return bot.sendMessage(chatId, "✅ Gasto registrado");
     }
-
     if (data.type === "receita") {
       const parsed = receitaSchema.parse(data);
       await supabase.from("receitas").insert({
@@ -718,7 +631,6 @@ Ou fale naturalmente:
       }
       return bot.sendMessage(chatId, msg);
     }
-
   } catch (err) {
     console.error(err);
     bot.sendMessage(chatId, "❌ Erro ao processar. Tente reformular.");
@@ -726,14 +638,12 @@ Ou fale naturalmente:
 });
 
 // =========================
-// 🛠️ FUNÇÕES AUXILIARES
+// 🛠️ FUNÇÃO AUXILIAR
 // =========================
-
 async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cartao = null, forma_pagamento = "pix", categoria = "outros") {
   const usuario = usuarios[chatId];
   const valorParcela = parseFloat((valorTotal / parcelas).toFixed(2));
   const principalId = uuidv4();
-
   for (let i = 1; i <= parcelas; i++) {
     await supabase.from("gastos").insert({
       usuario,
@@ -755,187 +665,69 @@ async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cart
 // =========================
 // ⏰ AGENDAMENTOS
 // =========================
-
 const TIMEZONE = "America/Sao_Paulo";
-
-// Lembrete diário
 cron.schedule("0 20 * * *", async () => {
   for (const chatId of Object.keys(usuarios)) {
-    try {
-      await bot.sendMessage(chatId, "🌙 Já registrou seus gastos de hoje?");
-    } catch (err) {
-      console.error(`Erro ao enviar lembrete para ${chatId}:`, err.message);
-    }
+    try { await bot.sendMessage(chatId, "🌙 Já registrou seus gastos de hoje?"); } catch (err) {}
   }
 }, { timezone: TIMEZONE });
-
-// Relatório semanal
 cron.schedule("0 9 * * 6", async () => {
   const hoje = moment().tz(TIMEZONE);
   const seteDiasAtras = hoje.clone().subtract(7, 'days');
-
   for (const [chatId, nome] of Object.entries(usuarios)) {
     try {
-      const { data: gastos } = await supabase
-        .from("gastos")
-        .select("valor")
-        .eq("usuario", nome)
-        .gte("created_at", seteDiasAtras.toISOString())
-        .lt("created_at", hoje.toISOString());
-
-      const { data: receitas } = await supabase
-        .from("receitas")
-        .select("valor")
-        .eq("usuario", nome)
-        .gte("created_at", seteDiasAtras.toISOString())
-        .lt("created_at", hoje.toISOString());
-
+      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
+      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
       const totalGastos = (gastos || []).reduce((s, g) => s + Number(g.valor || 0), 0);
       const totalReceitas = (receitas || []).reduce((s, r) => s + Number(r.valor || 0), 0);
-      const saldo = totalReceitas - totalGastos;
-
-      await bot.sendMessage(chatId,
-`📆 RESUMO DA SEMANA
-De ${seteDiasAtras.format("DD/MM")} a ${hoje.format("DD/MM")}
-
-💵 Receitas: R$ ${totalReceitas.toFixed(2)}
-💳 Gastos: R$ ${totalGastos.toFixed(2)}
-💰 Saldo: R$ ${saldo.toFixed(2)}`
-      );
-    } catch (err) {
-      console.error(`Erro no relatório semanal para ${chatId}:`, err.message);
-    }
+      await bot.sendMessage(chatId, `📆 RESUMO DA SEMANA\nDe ${seteDiasAtras.format("DD/MM")} a ${hoje.format("DD/MM")}\n\n💵 Receitas: R$ ${totalReceitas.toFixed(2)}\n💳 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`);
+    } catch (err) {}
   }
 }, { timezone: TIMEZONE });
-
-// Fechamento mensal
 cron.schedule("0 10 23 * *", async () => {
   const hoje = moment().tz(TIMEZONE);
   const mesAtual = hoje.month();
   const ano = hoje.year();
-
   const inicio = moment().tz(TIMEZONE).year(ano).month(mesAtual - 1).date(23).startOf('day');
   const fim = moment().tz(TIMEZONE).year(ano).month(mesAtual).date(23).endOf('day');
-
   for (const [chatId, nome] of Object.entries(usuarios)) {
     try {
-      const { data: gastos } = await supabase
-        .from("gastos")
-        .select("valor")
-        .eq("usuario", nome)
-        .gte("created_at", inicio.toISOString())
-        .lt("created_at", fim.toISOString());
-
-      const { data: receitas } = await supabase
-        .from("receitas")
-        .select("valor")
-        .eq("usuario", nome)
-        .gte("created_at", inicio.toISOString())
-        .lt("created_at", fim.toISOString());
-
+      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
+      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
       const totalGastos = (gastos || []).reduce((s, g) => s + Number(g.valor || 0), 0);
       const totalReceitas = (receitas || []).reduce((s, r) => s + Number(r.valor || 0), 0);
-      const saldo = totalReceitas - totalGastos;
-
-      await bot.sendMessage(chatId,
-`📊 FECHAMENTO (23/${mesAtual + 1})
-Período: ${inicio.format("DD/MM")} a ${fim.format("DD/MM")}
-
-💰 Receitas: R$ ${totalReceitas.toFixed(2)}
-💸 Gastos: R$ ${totalGastos.toFixed(2)}
-📈 Saldo: R$ ${saldo.toFixed(2)}`
-      );
-    } catch (err) {
-      console.error(`Erro no fechamento para ${chatId}:`, err.message);
-    }
+      await bot.sendMessage(chatId, `📊 FECHAMENTO (23/${mesAtual + 1})\nPeríodo: ${inicio.format("DD/MM")} a ${fim.format("DD/MM")}\n\n💰 Receitas: R$ ${totalReceitas.toFixed(2)}\n💸 Gastos: R$ ${totalGastos.toFixed(2)}\n📈 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`);
+    } catch (err) {}
   }
 }, { timezone: TIMEZONE });
-
-// Processar recorrências (receitas E gastos) todo dia à 1h
 cron.schedule("0 1 * * *", async () => {
   const hoje = moment().tz(TIMEZONE);
   const diaHoje = hoje.date();
-
   for (const [chatId, nome] of Object.entries(usuarios)) {
-    // Receitas recorrentes
-    const { data: recorrentesReceitas } = await supabase
-      .from("receitas")
-      .select("*")
-      .eq("usuario", nome)
-      .eq("recorrente", true)
-      .eq("ativo", true)
-      .eq("dia_recorrencia", diaHoje);
-
+    const { data: recorrentesReceitas } = await supabase.from("receitas").select("*").eq("usuario", nome).eq("recorrente", true).eq("ativo", true).eq("dia_recorrencia", diaHoje);
     if (recorrentesReceitas) {
       for (const rec of recorrentesReceitas) {
         try {
           const inicioDia = hoje.clone().startOf('day').toISOString();
           const fimDia = hoje.clone().endOf('day').toISOString();
-          const { data: jaLancada } = await supabase
-            .from("receitas")
-            .select("id")
-            .eq("usuario", nome)
-            .eq("descricao", rec.descricao)
-            .eq("valor", rec.valor)
-            .gte("created_at", inicioDia)
-            .lt("created_at", fimDia);
-
+          const { data: jaLancada } = await supabase.from("receitas").select("id").eq("usuario", nome).eq("descricao", rec.descricao).eq("valor", rec.valor).gte("created_at", inicioDia).lt("created_at", fimDia);
           if (!jaLancada || jaLancada.length === 0) {
-            await supabase.from("receitas").insert({
-              usuario: nome,
-              descricao: rec.descricao + " (recorrente)",
-              valor: rec.valor,
-              recorrente: false,
-              created_at: new Date().toISOString()
-            });
+            await supabase.from("receitas").insert({ usuario: nome, descricao: rec.descricao + " (recorrente)", valor: rec.valor, recorrente: false, created_at: new Date().toISOString() });
           }
-        } catch (err) {
-          console.error(`Erro ao processar recorrência de receita ${rec.id}:`, err.message);
-        }
+        } catch (err) {}
       }
     }
-
-    // Gastos recorrentes (NOVO)
-    const { data: recorrentesGastos } = await supabase
-      .from("gastos")
-      .select("*")
-      .eq("usuario", nome)
-      .eq("recorrente", true)
-      .eq("ativo", true)
-      .eq("dia_recorrencia", diaHoje);
-
+    const { data: recorrentesGastos } = await supabase.from("gastos").select("*").eq("usuario", nome).eq("recorrente", true).eq("ativo", true).eq("dia_recorrencia", diaHoje);
     if (recorrentesGastos) {
       for (const rec of recorrentesGastos) {
         try {
           const inicioDia = hoje.clone().startOf('day').toISOString();
           const fimDia = hoje.clone().endOf('day').toISOString();
-          const { data: jaLancada } = await supabase
-            .from("gastos")
-            .select("id")
-            .eq("usuario", nome)
-            .eq("descricao", rec.descricao)
-            .eq("valor", rec.valor)
-            .eq("recorrente", false) // os lançamentos automáticos não são marcados como recorrentes
-            .gte("created_at", inicioDia)
-            .lt("created_at", fimDia);
-
+          const { data: jaLancada } = await supabase.from("gastos").select("id").eq("usuario", nome).eq("descricao", rec.descricao).eq("valor", rec.valor).eq("recorrente", false).gte("created_at", inicioDia).lt("created_at", fimDia);
           if (!jaLancada || jaLancada.length === 0) {
-            await supabase.from("gastos").insert({
-              usuario: nome,
-              descricao: rec.descricao + " (recorrente)",
-              categoria: rec.categoria || "outros",
-              valor: rec.valor,
-              forma_pagamento: rec.forma_pagamento || "pix",
-              cartao: rec.cartao || null,
-              parcelado: false,
-              parcelas: 1,
-              recorrente: false, // o lançamento não é a origem
-              created_at: new Date().toISOString()
-            });
+            await supabase.from("gastos").insert({ usuario: nome, descricao: rec.descricao + " (recorrente)", categoria: rec.categoria || "outros", valor: rec.valor, forma_pagamento: rec.forma_pagamento || "pix", cartao: rec.cartao || null, parcelado: false, parcelas: 1, recorrente: false, created_at: new Date().toISOString() });
           }
-        } catch (err) {
-          console.error(`Erro ao processar gasto recorrente ${rec.id}:`, err.message);
-        }
+        } catch (err) {}
       }
     }
   }
@@ -944,9 +736,8 @@ cron.schedule("0 1 * * *", async () => {
 // =========================
 // 🌐 SERVER
 // =========================
-
-app.get("/", (req, res) => res.send("Bot rodando"));
+app.get("/", (req, res) => res.send("Bot rodando via webhook"));
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Bot rodando com gastos recorrentes.");
+  console.log("Bot rodando com webhook e gastos recorrentes.");
 });
