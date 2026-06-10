@@ -30,15 +30,15 @@ const openai = new OpenAI({
 });
 
 // =========================
-// 🧠 IA PROMPT
+// 🧠 IA PROMPT (MELHORADO)
 // =========================
 
 const SYSTEM_PROMPT = `
 Você é um assistente financeiro.
 
-Transforme mensagens em JSON válido.
+Você pode retornar:
 
-Se for gasto:
+1) Gasto único:
 {
   "type": "gasto",
   "descricao": "",
@@ -46,7 +46,17 @@ Se for gasto:
   "valor": number
 }
 
-Se for receita:
+2) LISTA DE GASTOS (fatura/extrato):
+[
+  {
+    "type": "gasto",
+    "descricao": "",
+    "categoria": "",
+    "valor": number
+  }
+]
+
+3) Receita:
 {
   "type": "receita",
   "descricao": "",
@@ -54,7 +64,7 @@ Se for receita:
   "recorrente": boolean
 }
 
-Se for consulta:
+4) Consulta:
 {
   "type": "consulta"
 }
@@ -62,7 +72,7 @@ Se for consulta:
 Categorias:
 alimentacao, transporte, lazer, mercado, contas, saude, outros.
 
-Responda APENAS JSON válido.
+Responda SOMENTE JSON válido.
 `;
 
 async function interpretar(texto) {
@@ -175,7 +185,7 @@ ${msg}`;
 }
 
 // =========================
-// 🤖 BOT
+// 🤖 BOT (COM FATURA MULTI-ITEM)
 // =========================
 
 bot.on("message", async (msg) => {
@@ -209,9 +219,29 @@ bot.on("message", async (msg) => {
     }
 
     const data = await interpretar(text);
-
     const usuario = usuarios[chatId];
 
+    // =========================
+    // 💥 CASO 1: LISTA DE GASTOS (FATURA)
+    // =========================
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        if (item.type === "gasto") {
+          await supabase.from("gastos").insert({
+            usuario,
+            descricao: item.descricao,
+            categoria: item.categoria || "outros",
+            valor: item.valor || 0
+          });
+        }
+      }
+
+      return bot.sendMessage(chatId, "✅ Fatura processada com sucesso");
+    }
+
+    // =========================
+    // 💸 GASTO ÚNICO
+    // =========================
     if (data.type === "gasto") {
       await supabase.from("gastos").insert({
         usuario,
@@ -223,6 +253,9 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(chatId, "✅ Gasto registrado");
     }
 
+    // =========================
+    // 💰 RECEITA
+    // =========================
     if (data.type === "receita") {
       await supabase.from("receitas").insert({
         usuario,
