@@ -90,8 +90,24 @@ REGRAS:
 - PIX e dinheiro = "pix"
 - Só usar cartão se citado explicitamente
 - Parcelas: se não falar → 1
-- Para receita recorrente, extraia o dia do mês (ex: "todo dia 5" → dia_recorrencia: 5).
-  Se não especificar o dia, pergunte ou assuma o dia atual.
+- Para receita recorrente, extraia o dia do mês (ex: "todo dia 5" → dia_recorrencia: 5). Se não especificar o dia, pergunte ou assuma o dia atual.
+
+**CATEGORIAS (gastos):**
+Analise a descrição e classifique em uma das categorias abaixo:
+- alimentação (restaurante, mercado, comida, delivery, lanche...)
+- transporte (gasolina, uber, ônibus, metrô, estacionamento...)
+- saúde (remédio, médico, consulta, hospital, exame...)
+- farmácia (farmacia, farmácia, manipulação...)
+- lazer (cinema, viagem, jogos, bar, festa...)
+- educação (curso, livro, faculdade, escola...)
+- moradia (aluguel, condomínio, conta de luz, água, internet...)
+- serviços (manicure, cabeleireiro, encanador...)
+- compras (roupa, eletrônicos, eletrodomésticos...)
+- assinaturas (netflix, spotify, academia...)
+- outros (se não se encaixar em nenhuma)
+
+Escolha a categoria mais adequada e preencha o campo "categoria".
+Se a descrição for muito vaga, use "outros".
 
 Responda APENAS JSON válido.
 `;
