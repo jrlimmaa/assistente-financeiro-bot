@@ -65,10 +65,6 @@ alimentacao, transporte, lazer, mercado, contas, saude, outros.
 Responda APENAS JSON válido.
 `;
 
-// =========================
-// 🧠 IA
-// =========================
-
 async function interpretar(texto) {
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -143,6 +139,32 @@ async function saldoGeral() {
 }
 
 // =========================
+// 📊 CATEGORIAS POR PESSOA
+// =========================
+
+async function categorias(chatId) {
+  const usuario = usuarios[chatId];
+
+  const { data } = await supabase
+    .from("gastos")
+    .select("categoria, valor")
+    .eq("usuario", usuario);
+
+  const resumo = {};
+
+  (data || []).forEach(item => {
+    const cat = item.categoria || "outros";
+    resumo[cat] = (resumo[cat] || 0) + Number(item.valor);
+  });
+
+  const msg = Object.entries(resumo)
+    .map(([cat, val]) => `• ${cat}: R$ ${val.toFixed(2)}`)
+    .join("\n");
+
+  return `📊 GASTOS POR CATEGORIA (${usuarios[chatId]})\n\n${msg}`;
+}
+
+// =========================
 // 🤖 BOT
 // =========================
 
@@ -155,10 +177,18 @@ bot.on("message", async (msg) => {
   try {
 
     // =========================
-    // 📌 SALDO GERAL
+    // 📌 SALDO GERAL (PRIMEIRO!)
     // =========================
     if (text.includes("saldo geral")) {
       const msg = await saldoGeral();
+      return bot.sendMessage(chatId, msg);
+    }
+
+    // =========================
+    // 📊 CATEGORIAS
+    // =========================
+    if (text.includes("categorias")) {
+      const msg = await categorias(chatId);
       return bot.sendMessage(chatId, msg);
     }
 
@@ -178,7 +208,7 @@ bot.on("message", async (msg) => {
     }
 
     // =========================
-    // 🧠 IA (APENAS SE NÃO FOR COMANDO)
+    // 🧠 IA
     // =========================
     const data = await interpretar(text);
 
@@ -211,14 +241,6 @@ bot.on("message", async (msg) => {
     bot.sendMessage(chatId, "❌ Erro ao processar");
   }
 });
-
-// =========================
-// ⏰ LOOP
-// =========================
-
-setInterval(async () => {
-  // (mantive vazio pra não quebrar nada do seu sistema atual)
-}, 60 * 60 * 1000);
 
 // =========================
 // 🌐 SERVER
