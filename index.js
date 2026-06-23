@@ -20,8 +20,8 @@ app.use(express.json());
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN);
 
 const usuarios = {
-  8823110547: "Emanuelly", // Substitua pelo seu ID de chat
-  1325366143: "Junior" // Substitua pelo seu ID de chat
+  8823110547: "Emanuelly",
+  1325366143: "Junior"
 };
 
 const supabase = createClient(
@@ -39,7 +39,7 @@ const openai = new OpenAI({
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_ID}.onrender.com`;
 bot.setWebHook(`${WEBHOOK_URL}/webhook`);
 
-app.post("/webhook", (req, res) => {
+app.post('/webhook', (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
@@ -105,8 +105,9 @@ REGRAS:
 - Só usar cartão se citado explicitamente
 - Parcelas: se não falar → 1
 - Para gasto ou receita recorrente, extraia o dia do mês (ex: "todo dia 5" → dia_recorrencia: 5).
-  Se não especificar o dia, assumir o dia atual.
+  Se não especificar o dia, pergunte ou assuma o dia atual.
 - Um gasto NÃO pode ser ao mesmo tempo parcelado e recorrente. Se for recorrente, ignorar parcelas.
+- Quando o usuário mencionar parcelas (ex: "em 3x", "parcelado"), retorne parcelado: true e parcelas: N. O campo valor deve ser o VALOR TOTAL DA COMPRA.
 
 **CATEGORIAS (gastos):**
 Analise a descrição e classifique em uma das categorias abaixo:
@@ -156,9 +157,6 @@ const gastoSchema = z.object({
   parcelas: z.number().int().min(1).default(1),
   recorrente: z.boolean().default(false),
   dia_recorrencia: z.number().int().min(1).max(31).optional()
-}).refine(data => !(data.parcelado && data.recorrente), {
-  message: "Um gasto não pode ser parcelado e recorrente ao mesmo tempo.",
-  path: ["parcelado", "recorrente"],
 });
 
 const receitaSchema = z.object({
@@ -175,18 +173,28 @@ const receitaSchema = z.object({
 const pendencias = new Map();
 
 // =========================
-// 💰 SALDO INDIVIDUAL
+// 💰 SALDO INDIVIDUAL (ALTERADO para exibir apenas o mês atual)
 // =========================
 async function saldoIndividual(chatId) {
   const usuario = usuarios[chatId];
+  // Filtro: início e fim do mês corrente (horário de Brasília)
+  const inicioMes = moment().tz("America/Sao_Paulo").startOf('month').toISOString();
+  const fimMes = moment().tz("America/Sao_Paulo").endOf('month').toISOString();
+
   const { data: gastos } = await supabase
     .from("gastos")
     .select("valor")
-    .eq("usuario", usuario);
+    .eq("usuario", usuario)
+    .gte("created_at", inicioMes)
+    .lte("created_at", fimMes);
+
   const { data: receitas } = await supabase
     .from("receitas")
     .select("valor")
-    .eq("usuario", usuario);
+    .eq("usuario", usuario)
+    .gte("created_at", inicioMes)
+    .lte("created_at", fimMes);
+
   const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
   const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
   return {
@@ -197,7 +205,7 @@ async function saldoIndividual(chatId) {
 }
 
 // =========================
-// 👥 SALDO GERAL
+// 👥 SALDO GERAL (mantém histórico completo)
 // =========================
 async function saldoGeral() {
   let resposta = `📊 SALDO GERAL\n\n`;
@@ -239,8 +247,8 @@ async function gastosPorCartao(chatId, cartaoNome) {
   let total = 0;
   const lista = data.map(g => {
     total += Number(g.valor);
-    const parcelasInfo = g.total_parcelas && g.total_parcelas > 1 ? ` (${g.parcela_numero}/${g.total_parcelas})` : '';
-    return `• ${g.descricao} - R$ ${g.valor.toFixed(2)}${parcelasInfo}`;
+    const parcelasInfo = g.total_parcelas ? ` (${g.parcela_numero}/${g.total_parcelas})` : '';
+    return `• ${g.descricao} - R$ ${g.valor}${parcelasInfo}`;
   }).join("\n");
   return `💳 CARTÃO: ${cartaoNome}\n\n${lista}\n\n💰 TOTAL: R$ ${total.toFixed(2)}`;
 }
@@ -259,7 +267,7 @@ async function listarCartoes(chatId) {
   if (cartoes.length === 0) {
     return "📭 Nenhum cartão registrado até agora.";
   }
-  return `💳 Seus cartões:\n${cartoes.join("\n")}`;
+  return `💳 Seus cartões:\n${cartoes.join('\n')}`;
 }
 
 // =========================
@@ -277,7 +285,7 @@ async function listarRecorrentes(chatId) {
   }
   let resposta = `🔄 RECEITAS RECORRENTES (${usuario})\n\n`;
   data.forEach(r => {
-    resposta += `• ID: ${r.id}\n  ${r.descricao} - R$ ${r.valor.toFixed(2)} (dia ${r.dia_recorrencia}) ${r.ativo ? '✅' : '❌'}\n\n`;
+    resposta += `• ID: ${r.id}\n  ${r.descricao} - R$ ${r.valor} (dia ${r.dia_recorrencia}) ${r.ativo ? '✅' : '❌'}\n\n`;
   });
   resposta += "Para cancelar: /cancelarrecorrente <id>";
   return resposta;
@@ -314,7 +322,7 @@ async function listarGastosRecorrentes(chatId) {
   }
   let resposta = `🔄 GASTOS RECORRENTES (${usuario})\n\n`;
   data.forEach(g => {
-    resposta += `• ID: ${g.id}\n  ${g.descricao} - R$ ${g.valor.toFixed(2)} (dia ${g.dia_recorrencia}) ${g.ativo ? '✅' : '❌'}\n\n`;
+    resposta += `• ID: ${g.id}\n  ${g.descricao} - R$ ${g.valor} (dia ${g.dia_recorrencia}) ${g.ativo ? '✅' : '❌'}\n\n`;
   });
   resposta += "Para cancelar: /cancelargastorecorrente <id>";
   return resposta;
@@ -337,6 +345,43 @@ async function cancelarGastoRecorrente(chatId, id) {
 }
 
 // =========================
+// 🛠️ FUNÇÃO AUXILIAR (CORRIGIDA – distribui parcelas no tempo e ajusta centavos)
+// =========================
+async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cartao = null, forma_pagamento = "pix", categoria = "outros") {
+  const usuario = usuarios[chatId];
+  const principalId = uuidv4();
+
+  // Cálculo exato em centavos para evitar diferenças
+  const totalCentavos = Math.round(valorTotal * 100);
+  const parcelaBaseCentavos = Math.floor(totalCentavos / parcelas);
+  const sobraCentavos = totalCentavos - parcelaBaseCentavos * parcelas;
+
+  for (let i = 1; i <= parcelas; i++) {
+    let valorParcelaCentavos = parcelaBaseCentavos;
+    if (i === 1) valorParcelaCentavos += sobraCentavos; // primeira parcela recebe a sobra
+    const valorParcela = valorParcelaCentavos / 100;
+
+    // Data da parcela: mês atual + (i-1) meses (para que cada uma caia no mês correto)
+    const dataParcela = moment().tz("America/Sao_Paulo").add(i - 1, 'months').toISOString();
+
+    await supabase.from("gastos").insert({
+      usuario,
+      descricao: `${descricao} (${i}/${parcelas})`,
+      categoria,
+      valor: valorParcela,
+      forma_pagamento: cartao ? "cartao_credito" : forma_pagamento,
+      cartao,
+      parcelado: true,
+      parcelas: parcelas,
+      parcela_numero: i,
+      total_parcelas: parcelas,
+      parcela_principal_id: principalId,
+      created_at: dataParcela   // <-- cada parcela com sua data futura
+    });
+  }
+}
+
+// =========================
 // 🤖 BOT – HANDLER
 // =========================
 bot.on("message", async (msg) => {
@@ -354,25 +399,29 @@ bot.on("message", async (msg) => {
     clearTimeout(pendente.timeout);
     pendencias.delete(chatId);
     const resposta = text.trim().toLowerCase();
-    let forma_pagamento = 'cartao_credito';
-    let cartao = resposta;
-
     if (resposta === 'pix' || resposta === 'dinheiro' || resposta === 'pular' || resposta === 'sem cartao') {
-      forma_pagamento = 'pix'; // Assumindo pix para 'sem cartao' ou 'pular'
-      cartao = null;
+      await criarGastoParcelado(
+        chatId,
+        pendente.dados.descricao,
+        pendente.dados.valor,
+        pendente.dados.parcelas,
+        null,
+        'pix',
+        pendente.dados.categoria
+      );
+      return bot.sendMessage(chatId, `✅ Gasto parcelado registrado (sem cartão): ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${(pendente.dados.valor / pendente.dados.parcelas).toFixed(2)}`);
     }
-
+    const cartao = text.trim();
     await criarGastoParcelado(
       chatId,
       pendente.dados.descricao,
       pendente.dados.valor,
       pendente.dados.parcelas,
       cartao,
-      forma_pagamento,
+      'cartao_credito',
       pendente.dados.categoria
     );
-    const valorParcela = (pendente.dados.valor / pendente.dados.parcelas).toFixed(2);
-    return bot.sendMessage(chatId, `✅ Gasto parcelado registrado ${cartao ? `no cartão ${cartao}` : '(sem cartão)'}: ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${valorParcela}`);
+    return bot.sendMessage(chatId, `✅ Gasto parcelado registrado no cartão ${cartao}: ${pendente.dados.descricao} - ${pendente.dados.parcelas}x de R$ ${(pendente.dados.valor / pendente.dados.parcelas).toFixed(2)}`);
   }
 
   const isCommand = msg.entities && msg.entities.some(e => e.type === 'bot_command');
@@ -385,7 +434,7 @@ bot.on("message", async (msg) => {
 `👋 Olá, ${usuarios[chatId]}! Eu sou seu assistente financeiro.
 
 Comandos disponíveis:
-/saldo - Seu saldo individual
+/saldo - Seu saldo individual (mês atual)
 /geral - Saldo geral (Junior + Emanuelly)
 /cartao Nome - Gastos de um cartão
 /cartoes - Listar seus cartões
@@ -407,7 +456,7 @@ Ou fale naturalmente:
       if (command === 'saldo') {
         const s = await saldoIndividual(chatId);
         return bot.sendMessage(chatId,
-`💰 SALDO (${usuarios[chatId]})
+`💰 SALDO (${usuarios[chatId]}) - MÊS ATUAL
 
 📥 Receitas: ${s.receitas.toFixed(2)}
 📤 Gastos: ${s.gastos.toFixed(2)}
@@ -433,56 +482,40 @@ Ou fale naturalmente:
         const valor = parseFloat(parts[0]);
         if (isNaN(valor) || valor <= 0) return bot.sendMessage(chatId, "❌ Valor inválido.");
 
-        let descricaoParts = [];
+        let descricao = "";
         let parcelas = 1;
         let diaRecorrencia = null;
-        let forma_pagamento = "pix"; // Default
-        let cartao = null;
 
-        // Parse description, looking for keywords
-        let i = 1;
-        while (i < parts.length) {
-          const part = parts[i].toLowerCase();
-          if (part === 'parcelas' || part === 'x') {
-            if (parts[i + 1]) {
-              parcelas = parseInt(parts[i + 1]);
-              if (isNaN(parcelas) || parcelas < 1) parcelas = 1;
-              i += 2;
-              continue;
-            }
-          } else if (part === 'dia') {
-            if (parts[i + 1]) {
-              diaRecorrencia = parseInt(parts[i + 1]);
-              if (isNaN(diaRecorrencia)) diaRecorrencia = null;
-              i += 2;
-              continue;
-            }
-          } else if (part === 'cartao') {
-            if (parts[i + 1]) {
-              cartao = parts[i + 1];
-              forma_pagamento = 'cartao_credito';
-              i += 2;
-              continue;
-            }
-          } else if (part === 'pix' || part === 'dinheiro') {
-            forma_pagamento = part;
-            cartao = null;
-            i += 1;
-            continue;
-          }
-          descricaoParts.push(parts[i]);
-          i++;
+        // Reconhece padrões como "3x", "parcelas 3", "em 3x"
+        const parcelasRegex = /(?:parcelas?\s*)?(\d+)\s*x/i;
+        const matchParcela = args.match(parcelasRegex);
+        if (matchParcela) {
+          parcelas = parseInt(matchParcela[1]);
+          if (isNaN(parcelas) || parcelas < 1) parcelas = 1;
+          const textoSemParcela = args.replace(matchParcela[0], '').trim();
+          descricao = textoSemParcela.split(' ').slice(1).join(' '); // remove o valor
         }
-        const descricao = descricaoParts.join(' ') || 'sem descrição';
+
+        // Reconhece "dia 5", "todo dia 5"
+        const diaRegex = /(?:todo\s+)?dia\s+(\d{1,2})\b/i;
+        const matchDia = args.match(diaRegex);
+        if (matchDia) {
+          diaRecorrencia = parseInt(matchDia[1]);
+          if (isNaN(diaRecorrencia)) diaRecorrencia = null;
+          const textoSemDia = args.replace(matchDia[0], '').trim();
+          if (!descricao) descricao = textoSemDia.split(' ').slice(1).join(' ');
+        }
+
+        if (!descricao) descricao = parts.slice(1).join(' ').replace(/parcelas?\s*\d+\s*x?/i, '').replace(/(?:todo\s+)?dia\s+\d{1,2}/i, '').trim() || 'sem descrição';
 
         if (diaRecorrencia) {
           await supabase.from("gastos").insert({
             usuario: usuarios[chatId],
             descricao,
-            categoria: "outros", // A IA cuidará da categorização para mensagens naturais
+            categoria: "outros",
             valor,
-            forma_pagamento: forma_pagamento, // Usar a forma de pagamento detectada
-            cartao: cartao,
+            forma_pagamento: "pix",
+            cartao: null,
             parcelado: false,
             parcelas: 1,
             recorrente: true,
@@ -494,18 +527,15 @@ Ou fale naturalmente:
         }
 
         if (parcelas > 1) {
-          // Se for parcelado e não recorrente, segue o fluxo de pendências
           const timeout = setTimeout(() => {
             pendencias.delete(chatId);
             bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
           }, 5 * 60 * 1000);
-          pendencias.set(chatId, { dados: { descricao, valor, parcelas, categoria: "outros", forma_pagamento, cartao }, timeout });
-          const valorParcela = (valor / parcelas).toFixed(2);
-          return bot.sendMessage(chatId, `📋 Compra parcelada: ${descricao} - ${parcelas}x de R$ ${valorParcela}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`);
+          pendencias.set(chatId, { dados: { descricao, valor, parcelas, categoria: "outros" }, timeout });
+          return bot.sendMessage(chatId, `📋 Compra parcelada: ${descricao} - ${parcelas}x de R$ ${(valor / parcelas).toFixed(2)}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`);
         }
 
-        // Gasto simples (não recorrente e não parcelado)
-        await criarGastoParcelado(chatId, descricao, valor, 1, cartao, forma_pagamento, "outros");
+        await criarGastoParcelado(chatId, descricao, valor, 1);
         return bot.sendMessage(chatId, `✅ Gasto registrado: ${descricao} - R$ ${valor.toFixed(2)}`);
       }
       if (command === 'receita') {
@@ -573,7 +603,7 @@ Ou fale naturalmente:
     if (textLower.includes("saldo")) {
       const s = await saldoIndividual(chatId);
       return bot.sendMessage(chatId,
-`💰 SALDO (${usuarios[chatId]})
+`💰 SALDO (${usuarios[chatId]}) - MÊS ATUAL
 
 📥 Receitas: ${s.receitas.toFixed(2)}
 📤 Gastos: ${s.gastos.toFixed(2)}
@@ -587,9 +617,8 @@ Ou fale naturalmente:
     }
 
     const data = await interpretar(text);
-    const parsed = gastoSchema.parse(data); // Validações adicionais do Zod
-
-    if (parsed.type === "gasto") {
+    if (data.type === "gasto") {
+      const parsed = gastoSchema.parse(data);
       if (parsed.recorrente) {
         await supabase.from("gastos").insert({
           usuario: usuarios[chatId],
@@ -613,9 +642,8 @@ Ou fale naturalmente:
       if (parsed.parcelado && parsed.parcelas > 1) {
         if (parsed.cartao) {
           await criarGastoParcelado(chatId, parsed.descricao, parsed.valor, parsed.parcelas, parsed.cartao, parsed.forma_pagamento, parsed.categoria);
-          const valorParcela = (parsed.valor / parsed.parcelas).toFixed(2);
           return bot.sendMessage(chatId,
-            `✅ Gasto parcelado registrado: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${valorParcela} no cartão ${parsed.cartao}`
+            `✅ Gasto parcelado registrado: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${(parsed.valor / parsed.parcelas).toFixed(2)} no cartão ${parsed.cartao}`
           );
         } else {
           const timeout = setTimeout(() => {
@@ -623,16 +651,15 @@ Ou fale naturalmente:
             bot.sendMessage(chatId, "⏰ Tempo esgotado. Registro cancelado.");
           }, 5 * 60 * 1000);
           pendencias.set(chatId, {
-            dados: { descricao: parsed.descricao, valor: parsed.valor, parcelas: parsed.parcelas, categoria: parsed.categoria || "outros", forma_pagamento: parsed.forma_pagamento, cartao: parsed.cartao },
+            dados: { descricao: parsed.descricao, valor: parsed.valor, parcelas: parsed.parcelas, categoria: parsed.categoria || "outros" },
             timeout
           });
-          const valorParcela = (parsed.valor / parsed.parcelas).toFixed(2);
           return bot.sendMessage(chatId,
-            `📋 Compra parcelada: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${valorParcela}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`
+            `📋 Compra parcelada: ${parsed.descricao} - ${parsed.parcelas}x de R$ ${(parsed.valor / parsed.parcelas).toFixed(2)}\n💳 Qual cartão foi usado?\n(Responda com o nome do cartão ou "pix" / "pular" para sem cartão)`
           );
         }
       }
-      // Gasto simples (não recorrente e não parcelado)
+      // Gasto simples
       await supabase.from("gastos").insert({
         usuario: usuarios[chatId],
         descricao: parsed.descricao,
@@ -644,64 +671,30 @@ Ou fale naturalmente:
         parcelas: 1,
         created_at: new Date().toISOString()
       });
-      return bot.sendMessage(chatId, `✅ Gasto registrado: ${parsed.descricao} - R$ ${parsed.valor.toFixed(2)}`);
+      return bot.sendMessage(chatId, "✅ Gasto registrado");
     }
-    if (parsed.type === "receita") {
-      // A IA pode retornar um tipo 'receita' mesmo que o schema seja de gasto, então precisamos verificar
-      const receitaParsed = receitaSchema.parse(data);
+    if (data.type === "receita") {
+      const parsed = receitaSchema.parse(data);
       await supabase.from("receitas").insert({
         usuario: usuarios[chatId],
-        descricao: receitaParsed.descricao,
-        valor: receitaParsed.valor,
-        recorrente: receitaParsed.recorrente || false,
-        dia_recorrencia: receitaParsed.dia_recorrencia || null,
+        descricao: parsed.descricao,
+        valor: parsed.valor,
+        recorrente: parsed.recorrente || false,
+        dia_recorrencia: parsed.dia_recorrencia || null,
         ativo: true,
         created_at: new Date().toISOString()
       });
-      let msg = `💰 Receita registrada: ${receitaParsed.descricao} - R$ ${receitaParsed.valor.toFixed(2)}`;
-      if (receitaParsed.recorrente && receitaParsed.dia_recorrencia) {
-        msg += ` (recorrente todo dia ${receitaParsed.dia_recorrencia})`;
+      let msg = "💰 Receita registrada";
+      if (parsed.recorrente && parsed.dia_recorrencia) {
+        msg += ` (recorrente todo dia ${parsed.dia_recorrencia})`;
       }
       return bot.sendMessage(chatId, msg);
     }
   } catch (err) {
-    console.error("Erro na interpretação da IA ou validação Zod:", err);
-    bot.sendMessage(chatId, "❌ Erro ao processar. Tente reformular ou use um comando específico.");
+    console.error(err);
+    bot.sendMessage(chatId, "❌ Erro ao processar. Tente reformular.");
   }
 });
-
-// =========================
-// 🛠️ FUNÇÃO AUXILIAR
-// =========================
-async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cartao = null, forma_pagamento = "pix", categoria = "outros") {
-  const usuario = usuarios[chatId];
-  // Usar BigInt para evitar problemas de ponto flutuante em cálculos financeiros
-  const valorTotalCentavos = Math.round(valorTotal * 100);
-  const valorParcelaCentavos = Math.round(valorTotalCentavos / parcelas);
-
-  for (let i = 1; i <= parcelas; i++) {
-    // Ajustar a última parcela para garantir que o total seja exato
-    let valorParcelaAtual = valorParcelaCentavos;
-    if (i === parcelas) {
-      valorParcelaAtual = valorTotalCentavos - (valorParcelaCentavos * (parcelas - 1));
-    }
-
-    await supabase.from("gastos").insert({
-      usuario,
-      descricao: `${descricao} (${i}/${parcelas})`,
-      categoria,
-      valor: (valorParcelaAtual / 100).toFixed(2), // Armazenar como float com 2 casas decimais
-      forma_pagamento: cartao ? "cartao_credito" : forma_pagamento,
-      cartao,
-      parcelado: true,
-      parcelas: parcelas, // Total de parcelas
-      parcela_numero: i, // Número da parcela atual
-      total_parcelas: parcelas, // Redundância para clareza
-      parcela_principal_id: uuidv4(), // ID único para agrupar parcelas
-      created_at: new Date().toISOString()
-    });
-  }
-}
 
 // =========================
 // ⏰ AGENDAMENTOS
@@ -778,6 +771,7 @@ cron.schedule("0 1 * * *", async () => {
 // 🌐 SERVER
 // =========================
 app.get("/", (req, res) => res.send("Bot rodando via webhook"));
+
 app.listen(process.env.PORT || 3000, () => {
   console.log("Bot rodando com webhook e gastos recorrentes.");
 });
