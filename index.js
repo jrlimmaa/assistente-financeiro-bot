@@ -7,6 +7,7 @@ import cron from "node-cron";
 import { z } from "zod";
 import moment from "moment-timezone";
 import { v4 as uuidv4 } from "uuid";
+import fetch from "node-fetch"; // <-- necessário para baixar a imagem da fatura
 
 dotenv.config();
 
@@ -64,8 +65,30 @@ app.post('/webhook', (req, res) => {
 })();
 
 // =========================
-// 🧠 IA PROMPT
+// 🧠 IA PROMPTS
 // =========================
+const PROMPT_FATURA = `
+Você é um assistente financeiro. Analise a imagem de uma FATURA DE CARTÃO DE CRÉDITO.
+Retorne APENAS um JSON com a lista de compras encontradas.
+
+Formato:
+{
+  "compras": [
+    {
+      "descricao": "string",
+      "valor": number,
+      "parcela_info": "string",
+      "categoria": "string"
+    }
+  ]
+}
+
+Regras:
+- O valor é o valor da parcela que aparece na fatura.
+- Se aparecer "3/6", parcela_info = "3/6". Se for à vista, use "1/1".
+- Categorias: alimentação, transporte, saúde, farmácia, lazer, educação, moradia, serviços, compras, assinaturas, outros.
+`;
+
 const SYSTEM_PROMPT = `
 Você é um assistente financeiro.
 
@@ -143,6 +166,41 @@ async function interpretar(texto) {
   return JSON.parse(res.choices[0].message.content);
 }
 
+// ✅ NOVA FUNÇÃO PARA ANALISAR FATURA (IMAGEM)
+async function analisarFatura(fileUrl) {
+  // 1. Baixar a imagem
+  const response = await fetch(fileUrl);
+  const buffer = await response.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+
+  // 2. Chamar GPT-4o-mini
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: PROMPT_FATURA },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Extraia as compras desta fatura." },
+          {
+            type: "image_url",
+            image_url: { url: `data:${contentType};base64,${base64}` }
+          }
+        ]
+      }
+    ],
+    max_tokens: 2000,
+    temperature: 0.1
+  });
+
+  // 3. Limpar e retornar JSON
+  const texto = completion.choices[0].message.content
+    .replace(/```json|```/g, "")
+    .trim();
+  return JSON.parse(texto);
+}
+
 // =========================
 // ✅ VALIDAÇÃO COM ZOD
 // =========================
@@ -168,16 +226,15 @@ const receitaSchema = z.object({
 });
 
 // =========================
-// 📌 PENDÊNCIAS (cartão parcelado)
+// 📌 PENDÊNCIAS
 // =========================
 const pendencias = new Map();
 
 // =========================
-// 💰 SALDO INDIVIDUAL (ALTERADO para exibir apenas o mês atual)
+// 💰 SALDO INDIVIDUAL (mês atual)
 // =========================
 async function saldoIndividual(chatId) {
   const usuario = usuarios[chatId];
-  // Filtro: início e fim do mês corrente (horário de Brasília)
   const inicioMes = moment().tz("America/Sao_Paulo").startOf('month').toISOString();
   const fimMes = moment().tz("America/Sao_Paulo").endOf('month').toISOString();
 
@@ -205,7 +262,7 @@ async function saldoIndividual(chatId) {
 }
 
 // =========================
-// 👥 SALDO GERAL (mantém histórico completo)
+// 👥 SALDO GERAL
 // =========================
 async function saldoGeral() {
   let resposta = `📊 SALDO GERAL\n\n`;
@@ -345,23 +402,21 @@ async function cancelarGastoRecorrente(chatId, id) {
 }
 
 // =========================
-// 🛠️ FUNÇÃO AUXILIAR (CORRIGIDA – distribui parcelas no tempo e ajusta centavos)
+// 🛠️ FUNÇÃO AUXILIAR (parcelas distribuídas no tempo)
 // =========================
 async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cartao = null, forma_pagamento = "pix", categoria = "outros") {
   const usuario = usuarios[chatId];
   const principalId = uuidv4();
 
-  // Cálculo exato em centavos para evitar diferenças
   const totalCentavos = Math.round(valorTotal * 100);
   const parcelaBaseCentavos = Math.floor(totalCentavos / parcelas);
   const sobraCentavos = totalCentavos - parcelaBaseCentavos * parcelas;
 
   for (let i = 1; i <= parcelas; i++) {
     let valorParcelaCentavos = parcelaBaseCentavos;
-    if (i === 1) valorParcelaCentavos += sobraCentavos; // primeira parcela recebe a sobra
+    if (i === 1) valorParcelaCentavos += sobraCentavos;
     const valorParcela = valorParcelaCentavos / 100;
 
-    // Data da parcela: mês atual + (i-1) meses (para que cada uma caia no mês correto)
     const dataParcela = moment().tz("America/Sao_Paulo").add(i - 1, 'months').toISOString();
 
     await supabase.from("gastos").insert({
@@ -376,13 +431,58 @@ async function criarGastoParcelado(chatId, descricao, valorTotal, parcelas, cart
       parcela_numero: i,
       total_parcelas: parcelas,
       parcela_principal_id: principalId,
-      created_at: dataParcela   // <-- cada parcela com sua data futura
+      created_at: dataParcela
     });
   }
 }
 
 // =========================
-// 🤖 BOT – HANDLER
+// 📸 HANDLER DE FOTOS (FATURA DE CARTÃO)
+// =========================
+bot.on("photo", async (msg) => {
+  const chatId = msg.chat.id;
+  if (!usuarios[chatId]) return;
+
+  const legenda = (msg.caption || "").toLowerCase();
+  if (!legenda.includes("fatura") && !legenda.includes("cartão") && !legenda.includes("cartao")) {
+    return; // só processa se a legenda indicar fatura
+  }
+
+  try {
+    await bot.sendMessage(chatId, "🔍 Analisando fatura...");
+    const foto = msg.photo[msg.photo.length - 1]; // melhor resolução
+    const fileUrl = await bot.getFileLink(foto.file_id);
+    const dados = await analisarFatura(fileUrl);
+
+    if (!dados.compras || dados.compras.length === 0) {
+      return bot.sendMessage(chatId, "❌ Nenhuma compra identificada.");
+    }
+
+    let resposta = "📄 **FATURA ANALISADA**\n\n";
+    dados.compras.forEach((c, i) => {
+      resposta += `${i + 1}. ${c.descricao}\n`;
+      resposta += `   💰 R$ ${Number(c.valor).toFixed(2)} | Parcela ${c.parcela_info} | ${c.categoria}\n`;
+    });
+    resposta += "\n✅ Registrar essas compras? (sim / não)";
+
+    const idPend = `fatura_${chatId}`;
+    if (pendencias.has(idPend)) clearTimeout(pendencias.get(idPend).timeout);
+    const timeout = setTimeout(() => {
+      pendencias.delete(idPend);
+      bot.sendMessage(chatId, "⏰ Tempo esgotado.");
+    }, 5 * 60 * 1000);
+    pendencias.set(idPend, { tipo: "fatura", dados: dados.compras, timeout });
+
+    await bot.sendMessage(chatId, resposta);
+
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(chatId, "❌ Erro ao processar fatura. Tente outra imagem.");
+  }
+});
+
+// =========================
+// 🤖 HANDLER DE MENSAGENS DE TEXTO
 // =========================
 bot.on("message", async (msg) => {
   if (!msg?.text) return;
@@ -393,7 +493,50 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "❌ Usuário não autorizado.");
   }
 
-  // 🛑 Pendência de cartão
+  // ⬇️ NOVA VERIFICAÇÃO: confirmação de fatura
+  const pendFat = pendencias.get(`fatura_${chatId}`);
+  if (pendFat && pendFat.tipo === "fatura") {
+    clearTimeout(pendFat.timeout);
+    pendencias.delete(`fatura_${chatId}`);
+
+    if (text.trim().toLowerCase() === "sim") {
+      for (const compra of pendFat.dados) {
+        let parcelado = false;
+        let parcelas = 1;
+        let parcNum = 1;
+        let totalParc = 1;
+
+        if (compra.parcela_info && compra.parcela_info.includes("/")) {
+          const partes = compra.parcela_info.split("/");
+          parcNum = parseInt(partes[0]) || 1;
+          totalParc = parseInt(partes[1]) || 1;
+          if (totalParc > 1) {
+            parcelado = true;
+            parcelas = totalParc;
+          }
+        }
+
+        await supabase.from("gastos").insert({
+          usuario: usuarios[chatId],
+          descricao: compra.descricao,
+          categoria: compra.categoria || "outros",
+          valor: Number(compra.valor),
+          forma_pagamento: "cartao_credito",
+          cartao: "Fatura",
+          parcelado,
+          parcelas,
+          parcela_numero: parcNum,
+          total_parcelas: totalParc,
+          created_at: new Date().toISOString()
+        });
+      }
+      return bot.sendMessage(chatId, `✅ ${pendFat.dados.length} compras registradas!`);
+    } else {
+      return bot.sendMessage(chatId, "❌ Registro cancelado.");
+    }
+  }
+
+  // 🛑 Pendência de cartão (existente)
   if (pendencias.has(chatId)) {
     const pendente = pendencias.get(chatId);
     clearTimeout(pendente.timeout);
@@ -450,7 +593,9 @@ Ou fale naturalmente:
 "Recebo 2000 de salário todo dia 5"
 "Pago 1200 de aluguel todo dia 5"
 "Comprei um tênis de 300 em 3x"
-"Saldo geral"`
+"Saldo geral"
+
+📸 Para ler fatura: envie uma foto com a legenda "fatura"`
         );
       }
       if (command === 'saldo') {
@@ -486,17 +631,15 @@ Ou fale naturalmente:
         let parcelas = 1;
         let diaRecorrencia = null;
 
-        // Reconhece padrões como "3x", "parcelas 3", "em 3x"
         const parcelasRegex = /(?:parcelas?\s*)?(\d+)\s*x/i;
         const matchParcela = args.match(parcelasRegex);
         if (matchParcela) {
           parcelas = parseInt(matchParcela[1]);
           if (isNaN(parcelas) || parcelas < 1) parcelas = 1;
           const textoSemParcela = args.replace(matchParcela[0], '').trim();
-          descricao = textoSemParcela.split(' ').slice(1).join(' '); // remove o valor
+          descricao = textoSemParcela.split(' ').slice(1).join(' ');
         }
 
-        // Reconhece "dia 5", "todo dia 5"
         const diaRegex = /(?:todo\s+)?dia\s+(\d{1,2})\b/i;
         const matchDia = args.match(diaRegex);
         if (matchDia) {
