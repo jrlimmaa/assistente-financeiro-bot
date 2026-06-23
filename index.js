@@ -172,7 +172,7 @@ async function analisarFatura(fileUrl) {
   const response = await fetch(fileUrl);
   const buffer = await response.arrayBuffer();
   const base64 = Buffer.from(buffer).toString("base64");
-  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const contentType = "image/jpeg";
 
   // 2. Chamar GPT-4o-mini
   const completion = await openai.chat.completions.create({
