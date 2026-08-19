@@ -242,6 +242,7 @@ async function saldoIndividual(chatId) {
     .from("gastos")
     .select("valor")
     .eq("usuario", usuario)
+    .eq("recorrente", false)
     .gte("created_at", inicioMes)
     .lte("created_at", fimMes);
 
@@ -249,6 +250,7 @@ async function saldoIndividual(chatId) {
     .from("receitas")
     .select("valor")
     .eq("usuario", usuario)
+    .eq("recorrente", false)
     .gte("created_at", inicioMes)
     .lte("created_at", fimMes);
 
@@ -272,11 +274,13 @@ async function saldoGeral() {
     const { data: g } = await supabase
       .from("gastos")
       .select("valor")
-      .eq("usuario", nome);
+      .eq("usuario", nome)
+      .eq("recorrente", false);
     const { data: r } = await supabase
       .from("receitas")
       .select("valor")
-      .eq("usuario", nome);
+      .eq("usuario", nome)
+      .eq("recorrente", false);
     const gastos = (g || []).reduce((s, i) => s + Number(i.valor || 0), 0);
     const receitas = (r || []).reduce((s, i) => s + Number(i.valor || 0), 0);
     const saldo = receitas - gastos;
@@ -853,12 +857,14 @@ cron.schedule("0 9 * * 6", async () => {
   const seteDiasAtras = hoje.clone().subtract(7, 'days');
   for (const [chatId, nome] of Object.entries(usuarios)) {
     try {
-      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
-      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
+      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).eq("recorrente", false).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
+      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).eq("recorrente", false).gte("created_at", seteDiasAtras.toISOString()).lt("created_at", hoje.toISOString());
       const totalGastos = (gastos || []).reduce((s, g) => s + Number(g.valor || 0), 0);
       const totalReceitas = (receitas || []).reduce((s, r) => s + Number(r.valor || 0), 0);
       await bot.sendMessage(chatId, `📆 RESUMO DA SEMANA\nDe ${seteDiasAtras.format("DD/MM")} a ${hoje.format("DD/MM")}\n\n💵 Receitas: R$ ${totalReceitas.toFixed(2)}\n💳 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`);
-    } catch (err) {}
+    } catch (err) {
+      console.error(`Erro no resumo semanal para ${nome}:`, err);
+    }
   }
 }, { timezone: TIMEZONE });
 cron.schedule("0 10 23 * *", async () => {
@@ -869,12 +875,14 @@ cron.schedule("0 10 23 * *", async () => {
   const fim = moment().tz(TIMEZONE).year(ano).month(mesAtual).date(23).endOf('day');
   for (const [chatId, nome] of Object.entries(usuarios)) {
     try {
-      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
-      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
+      const { data: gastos } = await supabase.from("gastos").select("valor").eq("usuario", nome).eq("recorrente", false).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
+      const { data: receitas } = await supabase.from("receitas").select("valor").eq("usuario", nome).eq("recorrente", false).gte("created_at", inicio.toISOString()).lt("created_at", fim.toISOString());
       const totalGastos = (gastos || []).reduce((s, g) => s + Number(g.valor || 0), 0);
       const totalReceitas = (receitas || []).reduce((s, r) => s + Number(r.valor || 0), 0);
       await bot.sendMessage(chatId, `📊 FECHAMENTO (23/${mesAtual + 1})\nPeríodo: ${inicio.format("DD/MM")} a ${fim.format("DD/MM")}\n\n💰 Receitas: R$ ${totalReceitas.toFixed(2)}\n💸 Gastos: R$ ${totalGastos.toFixed(2)}\n📈 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`);
-    } catch (err) {}
+    } catch (err) {
+      console.error(`Erro no fechamento mensal para ${nome}:`, err);
+    }
   }
 }, { timezone: TIMEZONE });
 cron.schedule("0 1 * * *", async () => {
@@ -887,11 +895,13 @@ cron.schedule("0 1 * * *", async () => {
         try {
           const inicioDia = hoje.clone().startOf('day').toISOString();
           const fimDia = hoje.clone().endOf('day').toISOString();
-          const { data: jaLancada } = await supabase.from("receitas").select("id").eq("usuario", nome).eq("descricao", rec.descricao).eq("valor", rec.valor).gte("created_at", inicioDia).lt("created_at", fimDia);
+          const { data: jaLancada } = await supabase.from("receitas").select("id").eq("usuario", nome).eq("descricao", rec.descricao + " (recorrente)").eq("recorrente", false).gte("created_at", inicioDia).lt("created_at", fimDia);
           if (!jaLancada || jaLancada.length === 0) {
             await supabase.from("receitas").insert({ usuario: nome, descricao: rec.descricao + " (recorrente)", valor: rec.valor, recorrente: false, created_at: new Date().toISOString() });
           }
-        } catch (err) {}
+        } catch (err) {
+          console.error(`Erro ao lançar receita recorrente "${rec.descricao}" para ${nome}:`, err);
+        }
       }
     }
     const { data: recorrentesGastos } = await supabase.from("gastos").select("*").eq("usuario", nome).eq("recorrente", true).eq("ativo", true).eq("dia_recorrencia", diaHoje);
@@ -900,11 +910,13 @@ cron.schedule("0 1 * * *", async () => {
         try {
           const inicioDia = hoje.clone().startOf('day').toISOString();
           const fimDia = hoje.clone().endOf('day').toISOString();
-          const { data: jaLancada } = await supabase.from("gastos").select("id").eq("usuario", nome).eq("descricao", rec.descricao).eq("valor", rec.valor).eq("recorrente", false).gte("created_at", inicioDia).lt("created_at", fimDia);
+          const { data: jaLancada } = await supabase.from("gastos").select("id").eq("usuario", nome).eq("descricao", rec.descricao + " (recorrente)").eq("recorrente", false).gte("created_at", inicioDia).lt("created_at", fimDia);
           if (!jaLancada || jaLancada.length === 0) {
             await supabase.from("gastos").insert({ usuario: nome, descricao: rec.descricao + " (recorrente)", categoria: rec.categoria || "outros", valor: rec.valor, forma_pagamento: rec.forma_pagamento || "pix", cartao: rec.cartao || null, parcelado: false, parcelas: 1, recorrente: false, created_at: new Date().toISOString() });
           }
-        } catch (err) {}
+        } catch (err) {
+          console.error(`Erro ao lançar gasto recorrente "${rec.descricao}" para ${nome}:`, err);
+        }
       }
     }
   }
