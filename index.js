@@ -233,33 +233,62 @@ const pendencias = new Map();
 // =========================
 // 💰 SALDO INDIVIDUAL (mês atual)
 // =========================
-async function saldoIndividual(chatId) {
+function obterPeriodo(texto) {
+  const agora = moment().tz(TIMEZONE);
+  const normalizado = texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const meses = {
+    janeiro: 0, fevereiro: 1, marco: 2, abril: 3, maio: 4, junho: 5,
+    julho: 6, agosto: 7, setembro: 8, outubro: 9, novembro: 10, dezembro: 11
+  };
+
+  const intervalo = normalizado.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?\s*(?:a|ate|-)\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/);
+  if (intervalo) {
+    const anoInicial = Number(intervalo[3] || agora.year());
+    const anoFinal = Number(intervalo[6] || anoInicial);
+    const inicio = moment.tz({ year: anoInicial, month: Number(intervalo[2]) - 1, day: Number(intervalo[1]) }, TIMEZONE).startOf("day");
+    const fim = moment.tz({ year: anoFinal, month: Number(intervalo[5]) - 1, day: Number(intervalo[4]) }, TIMEZONE).add(1, "day").startOf("day");
+    return { inicio, fim, rotulo: `${inicio.format("DD/MM/YYYY")} a ${fim.clone().subtract(1, "day").format("DD/MM/YYYY")}` };
+  }
+
+  for (const [nome, mes] of Object.entries(meses)) {
+    if (normalizado.includes(nome)) {
+      const ano = agora.year();
+      const inicio = agora.clone().year(ano).month(mes).startOf("month");
+      const fim = inicio.clone().add(1, "month");
+      return { inicio, fim, rotulo: inicio.format("MMMM [de] YYYY") };
+    }
+  }
+
+  const inicio = agora.clone().startOf("month");
+  const fim = inicio.clone().add(1, "month");
+  return { inicio, fim, rotulo: inicio.format("MMMM [de] YYYY") };
+}
+
+async function resumoPeriodo(chatId, texto = "") {
   const usuario = usuarios[chatId];
-  const inicioMes = moment().tz("America/Sao_Paulo").startOf('month').toISOString();
-  const fimMes = moment().tz("America/Sao_Paulo").endOf('month').toISOString();
+  const { inicio, fim, rotulo } = obterPeriodo(texto);
+  const inicioIso = inicio.toISOString();
+  const fimIso = fim.toISOString();
 
-  const { data: gastos } = await supabase
-    .from("gastos")
-    .select("valor")
-    .eq("usuario", usuario)
-    .eq("recorrente", false)
-    .gte("created_at", inicioMes)
-    .lte("created_at", fimMes);
+  const [gastosResult, receitasResult] = await Promise.all([
+    supabase.from("gastos").select("valor").eq("usuario", usuario).eq("recorrente", false).gte("created_at", inicioIso).lt("created_at", fimIso),
+    supabase.from("receitas").select("valor").eq("usuario", usuario).eq("recorrente", false).gte("created_at", inicioIso).lt("created_at", fimIso)
+  ]);
+  if (gastosResult.error) throw gastosResult.error;
+  if (receitasResult.error) throw receitasResult.error;
 
-  const { data: receitas } = await supabase
-    .from("receitas")
-    .select("valor")
-    .eq("usuario", usuario)
-    .eq("recorrente", false)
-    .gte("created_at", inicioMes)
-    .lte("created_at", fimMes);
+  const gastos = (gastosResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
+  const receitas = (receitasResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
+  return `💰 RESUMO (${usuario}) - ${rotulo}\n\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💳 Saldo: R$ ${(receitas - gastos).toFixed(2)}`;
+}
 
-  const totalGastos = (gastos || []).reduce((a, b) => a + Number(b.valor || 0), 0);
-  const totalReceitas = (receitas || []).reduce((a, b) => a + Number(b.valor || 0), 0);
+async function saldoIndividual(chatId) {
+  const resumo = await resumoPeriodo(chatId);
+  const linhas = resumo.split("\n");
   return {
-    gastos: totalGastos,
-    receitas: totalReceitas,
-    saldo: totalReceitas - totalGastos
+    gastos: Number(linhas[3].replace(/[^0-9,-]/g, "").replace(",", ".")) || 0,
+    receitas: Number(linhas[2].replace(/[^0-9,-]/g, "").replace(",", ".")) || 0,
+    saldo: Number(linhas[4].replace(/[^0-9,-]/g, "").replace(",", ".")) || 0
   };
 }
 
@@ -764,6 +793,10 @@ Ou fale naturalmente:
     }
 
     const data = await interpretar(text);
+    if (data.type === "consulta") {
+      const resposta = await resumoPeriodo(chatId, text);
+      return bot.sendMessage(chatId, resposta);
+    }
     if (data.type === "gasto") {
       const parsed = gastoSchema.parse(data);
       if (parsed.recorrente) {
