@@ -299,24 +299,28 @@ async function saldoGeral() {
   let resposta = `📊 SALDO GERAL\n\n`;
   let totalGastos = 0;
   let totalReceitas = 0;
-  for (const [id, nome] of Object.entries(usuarios)) {
-    const { data: g } = await supabase
-      .from("gastos")
-      .select("valor")
-      .eq("usuario", nome)
-      .eq("recorrente", false);
-    const { data: r } = await supabase
-      .from("receitas")
-      .select("valor")
-      .eq("usuario", nome)
-      .eq("recorrente", false);
-    const gastos = (g || []).reduce((s, i) => s + Number(i.valor || 0), 0);
-    const receitas = (r || []).reduce((s, i) => s + Number(i.valor || 0), 0);
+
+  for (const nome of Object.values(usuarios)) {
+    const [gastosResult, receitasResult] = await Promise.all([
+      supabase.from("gastos").select("valor, recorrente, ativo").eq("usuario", nome),
+      supabase.from("receitas").select("valor, recorrente, ativo").eq("usuario", nome)
+    ]);
+    if (gastosResult.error) throw gastosResult.error;
+    if (receitasResult.error) throw receitasResult.error;
+
+    const gastos = (gastosResult.data || [])
+      .filter(item => !item.recorrente || item.ativo !== false)
+      .reduce((soma, item) => soma + Number(item.valor || 0), 0);
+    const receitas = (receitasResult.data || [])
+      .filter(item => !item.recorrente || item.ativo !== false)
+      .reduce((soma, item) => soma + Number(item.valor || 0), 0);
     const saldo = receitas - gastos;
+
     resposta += `👤 ${nome}\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💵 Saldo: R$ ${saldo.toFixed(2)}\n\n`;
     totalReceitas += receitas;
     totalGastos += gastos;
   }
+
   resposta += `💳 TOTAL CONSOLIDADO\n📥 Receitas: R$ ${totalReceitas.toFixed(2)}\n📤 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`;
   return resposta;
 }
