@@ -776,6 +776,12 @@ Ou fale naturalmente:
       const resposta = await saldoGeral();
       return bot.sendMessage(chatId, resposta);
     }
+    const pedeResumo = /(mostrar|mostra|me diga|me diz|quanto|resumo|relatorio|relatório|extrato|listar|liste|periodo|período)/i.test(textLower)
+      && /(receita|receitas|renda|entrada|entradas|gasto|gastos|despesa|despesas|saldo)/i.test(textLower);
+    if (pedeResumo) {
+      const resposta = await resumoPeriodo(chatId, text);
+      return bot.sendMessage(chatId, resposta);
+    }
     if (textLower.includes("saldo")) {
       const s = await saldoIndividual(chatId);
       return bot.sendMessage(chatId,
