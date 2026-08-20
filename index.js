@@ -343,8 +343,8 @@ async function saldoIndividual(chatId) {
 // =========================
 // 👥 SALDO GERAL
 // =========================
-async function saldoGeral() {
-  const { inicio, fim, rotulo } = cicloFinanceiro();
+async function saldoGeral(texto = "") {
+  const { inicio, fim, rotulo } = texto.trim() ? obterPeriodo(texto) : cicloFinanceiro();
   let resposta = `📊 SALDO GERAL PROJETADO\n${rotulo}\n\n`;
   let totalGastos = 0;
   let totalReceitas = 0;
@@ -681,7 +681,7 @@ Ou fale naturalmente:
         return bot.sendMessage(chatId, resposta);
       }
       if (command === 'geral') {
-        const resposta = await saldoGeral();
+        const resposta = await saldoGeral(args || "");
         return bot.sendMessage(chatId, resposta);
       }
       if (command === 'cartao') {
@@ -814,7 +814,7 @@ Ou fale naturalmente:
   try {
     const textLower = text.toLowerCase();
     if (textLower.includes("saldo geral") || textLower === "geral") {
-      const resposta = await saldoGeral();
+      const resposta = await saldoGeral(text);
       return bot.sendMessage(chatId, resposta);
     }
     const pedeResumo = /(mostrar|mostra|me diga|me diz|quanto|resumo|relatorio|relatório|extrato|listar|liste|periodo|período)/i.test(textLower)
