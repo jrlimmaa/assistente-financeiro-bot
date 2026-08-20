@@ -253,9 +253,13 @@ function obterPeriodo(texto) {
   if (intervalo) {
     const anoInicial = Number(intervalo[3] || agora.year());
     const anoFinal = Number(intervalo[6] || anoInicial);
-    const inicio = moment.tz({ year: anoInicial, month: Number(intervalo[2]) - 1, day: Number(intervalo[1]) }, TIMEZONE).startOf("day");
-    const fim = moment.tz({ year: anoFinal, month: Number(intervalo[5]) - 1, day: Number(intervalo[4]) }, TIMEZONE).add(1, "day").startOf("day");
-    return { inicio, fim, rotulo: `${inicio.format("DD/MM/YYYY")} a ${fim.clone().subtract(1, "day").format("DD/MM/YYYY")}` };
+    const diaInicial = Number(intervalo[1]);
+    const diaFinal = Number(intervalo[4]);
+    const inicio = moment.tz({ year: anoInicial, month: Number(intervalo[2]) - 1, day: diaInicial }, TIMEZONE).startOf("day");
+    const fimBase = moment.tz({ year: anoFinal, month: Number(intervalo[5]) - 1, day: diaFinal }, TIMEZONE).startOf("day");
+    const ehCicloCartao = diaInicial === 23 && diaFinal === 23;
+    const fim = ehCicloCartao ? fimBase : fimBase.clone().add(1, "day");
+    return { inicio, fim, rotulo: `${inicio.format("DD/MM/YYYY")} a ${ehCicloCartao ? fim.format("DD/MM/YYYY") : fim.clone().subtract(1, "day").format("DD/MM/YYYY")}` };
   }
 
   for (const [nome, mes] of Object.entries(meses)) {
@@ -642,14 +646,8 @@ Ou fale naturalmente:
         );
       }
       if (command === 'saldo') {
-        const s = await saldoIndividual(chatId);
-        return bot.sendMessage(chatId,
-`💰 SALDO (${usuarios[chatId]}) - MÊS ATUAL
-
-📥 Receitas: ${s.receitas.toFixed(2)}
-📤 Gastos: ${s.gastos.toFixed(2)}
-💳 Saldo: ${s.saldo.toFixed(2)}`
-        );
+        const resposta = await resumoPeriodo(chatId, args || "");
+        return bot.sendMessage(chatId, resposta);
       }
       if (command === 'geral') {
         const resposta = await saldoGeral();
@@ -790,7 +788,8 @@ Ou fale naturalmente:
     }
     const pedeResumo = /(mostrar|mostra|me diga|me diz|quanto|resumo|relatorio|relatório|extrato|listar|liste|periodo|período)/i.test(textLower)
       && /(receita|receitas|renda|entrada|entradas|gasto|gastos|despesa|despesas|saldo)/i.test(textLower);
-    if (pedeResumo) {
+    const temIntervalo = /\d{1,2}\/\d{1,2}(?:\/\d{4})?\s*(?:a|ate|-)\s*\d{1,2}\/\d{1,2}/i.test(textLower);
+    if (pedeResumo || (textLower.includes("saldo") && temIntervalo)) {
       const resposta = await resumoPeriodo(chatId, text);
       return bot.sendMessage(chatId, resposta);
     }
