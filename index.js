@@ -273,22 +273,61 @@ function obterPeriodo(texto) {
   return cicloFinanceiro(agora);
 }
 
-async function resumoPeriodo(chatId, texto = "") {
-  const usuario = usuarios[chatId];
-  const { inicio, fim, rotulo } = obterPeriodo(texto);
+function datasRecorrenciaNoPeriodo(inicio, fim, diaRecorrencia) {
+  const datas = [];
+  if (!diaRecorrencia) return datas;
+  let mes = inicio.clone().startOf("month").subtract(1, "month");
+  const limite = fim.clone().add(1, "month");
+  while (mes.isBefore(limite)) {
+    const dia = Math.min(Number(diaRecorrencia), mes.daysInMonth());
+    const ocorrencia = mes.clone().date(dia).startOf("day");
+    if (ocorrencia.isSameOrAfter(inicio) && ocorrencia.isBefore(fim)) datas.push(ocorrencia);
+    mes.add(1, "month");
+  }
+  return datas;
+}
+
+async function resumoFinanceiroUsuario(usuario, inicio, fim) {
   const inicioIso = inicio.toISOString();
   const fimIso = fim.toISOString();
-
-  const [gastosResult, receitasResult] = await Promise.all([
-    supabase.from("gastos").select("valor").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
-    supabase.from("receitas").select("valor").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso)
+  const [gastosResult, receitasResult, gastosRecResult, receitasRecResult] = await Promise.all([
+    supabase.from("gastos").select("valor, descricao, data_financeira").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
+    supabase.from("receitas").select("valor, descricao, data_financeira").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
+    supabase.from("gastos").select("descricao, valor, dia_recorrencia").eq("usuario", usuario).eq("recorrente", true).eq("ativo", true),
+    supabase.from("receitas").select("descricao, valor, dia_recorrencia").eq("usuario", usuario).eq("recorrente", true).eq("ativo", true)
   ]);
-  if (gastosResult.error) throw gastosResult.error;
-  if (receitasResult.error) throw receitasResult.error;
+  for (const resultado of [gastosResult, receitasResult, gastosRecResult, receitasRecResult]) {
+    if (resultado.error) throw resultado.error;
+  }
 
   const gastos = (gastosResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
   const receitas = (receitasResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
-  return `💰 RESUMO (${usuario}) - ${rotulo}\n\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💳 Saldo: R$ ${(receitas - gastos).toFixed(2)}`;
+  let gastosProjetados = 0;
+  let receitasProjetadas = 0;
+
+  for (const recorrente of gastosRecResult.data || []) {
+    for (const data of datasRecorrenciaNoPeriodo(inicio, fim, recorrente.dia_recorrencia)) {
+      const jaLancado = (gastosResult.data || []).some(item => item.descricao === `${recorrente.descricao} (recorrente)` && Number(item.valor || 0) === Number(recorrente.valor || 0) && moment(item.data_financeira).tz(TIMEZONE).isSame(data, "day"));
+      if (!jaLancado) gastosProjetados += Number(recorrente.valor || 0);
+    }
+  }
+
+  for (const recorrente of receitasRecResult.data || []) {
+    for (const data of datasRecorrenciaNoPeriodo(inicio, fim, recorrente.dia_recorrencia)) {
+      const jaLancada = (receitasResult.data || []).some(item => item.descricao === `${recorrente.descricao} (recorrente)` && Number(item.valor || 0) === Number(recorrente.valor || 0) && moment(item.data_financeira).tz(TIMEZONE).isSame(data, "day"));
+      if (!jaLancada) receitasProjetadas += Number(recorrente.valor || 0);
+    }
+  }
+
+  return { gastos: gastos + gastosProjetados, receitas: receitas + receitasProjetadas, gastosProjetados, receitasProjetadas };
+}
+
+async function resumoPeriodo(chatId, texto = "") {
+  const usuario = usuarios[chatId];
+  const { inicio, fim, rotulo } = obterPeriodo(texto);
+  const resumo = await resumoFinanceiroUsuario(usuario, inicio, fim);
+  const observacao = resumo.gastosProjetados || resumo.receitasProjetadas ? "\n\n📌 Inclui parcelas futuras e recorrências previstas." : "";
+  return `💰 RESUMO PROJETADO (${usuario}) - ${rotulo}\n\n📥 Receitas: R$ ${resumo.receitas.toFixed(2)}\n📤 Gastos: R$ ${resumo.gastos.toFixed(2)}\n💳 Saldo: R$ ${(resumo.receitas - resumo.gastos).toFixed(2)}${observacao}`;
 }
 
 async function saldoIndividual(chatId) {
@@ -306,30 +345,22 @@ async function saldoIndividual(chatId) {
 // =========================
 async function saldoGeral() {
   const { inicio, fim, rotulo } = cicloFinanceiro();
-  const inicioIso = inicio.toISOString();
-  const fimIso = fim.toISOString();
-  let resposta = `📊 SALDO GERAL\n${rotulo}\n\n`;
+  let resposta = `📊 SALDO GERAL PROJETADO\n${rotulo}\n\n`;
   let totalGastos = 0;
   let totalReceitas = 0;
+  let temProjecao = false;
 
   for (const nome of Object.values(usuarios)) {
-    const [gastosResult, receitasResult] = await Promise.all([
-      supabase.from("gastos").select("valor").eq("usuario", nome).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
-      supabase.from("receitas").select("valor").eq("usuario", nome).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso)
-    ]);
-    if (gastosResult.error) throw gastosResult.error;
-    if (receitasResult.error) throw receitasResult.error;
-
-    const gastos = (gastosResult.data || []).reduce((soma, item) => soma + Number(item.valor || 0), 0);
-    const receitas = (receitasResult.data || []).reduce((soma, item) => soma + Number(item.valor || 0), 0);
-    const saldo = receitas - gastos;
-
-    resposta += `👤 ${nome}\n📥 Receitas: R$ ${receitas.toFixed(2)}\n📤 Gastos: R$ ${gastos.toFixed(2)}\n💵 Saldo: R$ ${saldo.toFixed(2)}\n\n`;
-    totalReceitas += receitas;
-    totalGastos += gastos;
+    const resumo = await resumoFinanceiroUsuario(nome, inicio, fim);
+    const saldo = resumo.receitas - resumo.gastos;
+    resposta += `👤 ${nome}\n📥 Receitas: R$ ${resumo.receitas.toFixed(2)}\n📤 Gastos: R$ ${resumo.gastos.toFixed(2)}\n💵 Saldo: R$ ${saldo.toFixed(2)}\n\n`;
+    totalReceitas += resumo.receitas;
+    totalGastos += resumo.gastos;
+    temProjecao = temProjecao || resumo.gastosProjetados > 0 || resumo.receitasProjetadas > 0;
   }
 
   resposta += `💳 TOTAL DO CICLO\n📥 Receitas: R$ ${totalReceitas.toFixed(2)}\n📤 Gastos: R$ ${totalGastos.toFixed(2)}\n💰 Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}`;
+  if (temProjecao) resposta += "\n\n📌 Inclui parcelas futuras e recorrências previstas.";
   return resposta;
 }
 
