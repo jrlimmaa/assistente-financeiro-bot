@@ -287,22 +287,56 @@ function datasRecorrenciaNoPeriodo(inicio, fim, diaRecorrencia) {
   return datas;
 }
 
+function grupoParcela(item) {
+  const descricao = String(item.descricao || "")
+    .replace(/\s*\(\d+\/\d+\)\s*$/, "")
+    .replace(/\s+\d+\/\d+\s*$/, "")
+    .trim();
+  return `${descricao}|${Number(item.valor || 0).toFixed(2)}|${Number(item.total_parcelas || 0)}`;
+}
+
+function parcelasFuturasNoPeriodo(parcelas, inicio, fim) {
+  const existentes = new Set();
+  for (const item of parcelas) {
+    const atual = Number(item.parcela_numero || 0);
+    const total = Number(item.total_parcelas || 0);
+    if (atual > 0 && total > 0) existentes.add(`${grupoParcela(item)}|${atual}`);
+  }
+
+  let totalProjetado = 0;
+  for (const item of parcelas) {
+    const atual = Number(item.parcela_numero || 0);
+    const total = Number(item.total_parcelas || 0);
+    if (!item.data_financeira || atual <= 0 || total <= atual) continue;
+    const grupo = grupoParcela(item);
+    for (let numero = atual + 1; numero <= total; numero += 1) {
+      const chave = `${grupo}|${numero}`;
+      if (existentes.has(chave)) continue;
+      const data = moment(item.data_financeira).tz(TIMEZONE).add(numero - atual, "months").startOf("day");
+      if (data.isSameOrAfter(inicio) && data.isBefore(fim)) totalProjetado += Number(item.valor || 0);
+      existentes.add(chave);
+    }
+  }
+  return totalProjetado;
+}
+
 async function resumoFinanceiroUsuario(usuario, inicio, fim) {
   const inicioIso = inicio.toISOString();
   const fimIso = fim.toISOString();
-  const [gastosResult, receitasResult, gastosRecResult, receitasRecResult] = await Promise.all([
-    supabase.from("gastos").select("valor, descricao, data_financeira").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
+  const [gastosResult, receitasResult, gastosRecResult, receitasRecResult, parcelasResult] = await Promise.all([
+    supabase.from("gastos").select("valor, descricao, data_financeira, parcelado, parcela_numero, total_parcelas").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
     supabase.from("receitas").select("valor, descricao, data_financeira").eq("usuario", usuario).eq("recorrente", false).gte("data_financeira", inicioIso).lt("data_financeira", fimIso),
     supabase.from("gastos").select("descricao, valor, dia_recorrencia").eq("usuario", usuario).eq("recorrente", true).eq("ativo", true),
-    supabase.from("receitas").select("descricao, valor, dia_recorrencia").eq("usuario", usuario).eq("recorrente", true).eq("ativo", true)
+    supabase.from("receitas").select("descricao, valor, dia_recorrencia").eq("usuario", usuario).eq("recorrente", true).eq("ativo", true),
+    supabase.from("gastos").select("descricao, valor, data_financeira, parcelado, parcela_numero, total_parcelas").eq("usuario", usuario).eq("recorrente", false).eq("parcelado", true)
   ]);
-  for (const resultado of [gastosResult, receitasResult, gastosRecResult, receitasRecResult]) {
+  for (const resultado of [gastosResult, receitasResult, gastosRecResult, receitasRecResult, parcelasResult]) {
     if (resultado.error) throw resultado.error;
   }
 
   const gastos = (gastosResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
   const receitas = (receitasResult.data || []).reduce((total, item) => total + Number(item.valor || 0), 0);
-  let gastosProjetados = 0;
+  let gastosProjetados = parcelasFuturasNoPeriodo(parcelasResult.data || [], inicio, fim);
   let receitasProjetadas = 0;
 
   for (const recorrente of gastosRecResult.data || []) {
